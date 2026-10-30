@@ -1,8 +1,8 @@
 {
   "name": "@local/codementor",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
-  "description": "CodeMentor v2：可导入项目的源码阅读、课程式学习、分级实践与可追问的语义面试",
+  "description": "CodeMentor v3：功能架构、证据化讲解、差异化课程、场景实践与可追问面试",
   "type": "module",
   "main": "index.js",
   "exports": {

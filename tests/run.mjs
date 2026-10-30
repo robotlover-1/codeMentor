@@ -9,8 +9,11 @@ import { fileURLToPath } from 'node:url';
 import { apply } from '../index.js';
 import { createApiHandler } from '../lib/api.js';
 import { buildSymbolIndex, findSymbols, scanProject, traceChain } from '../lib/analyze.js';
+import { buildCapabilities } from '../lib/capabilities.js';
 import { languageOf, maskSource, matchBrace, SCHEMA_VERSION } from '../lib/core.js';
 import { KnowledgeStore } from '../lib/fs-scan.js';
+import { buildLessons, buildModuleNarratives, moduleNarrative } from '../lib/mentor.js';
+import { explainFunction, moduleTeaching } from '../lib/teaching.js';
 import {
   buildQuestionBank,
   currentQuestion,
@@ -665,6 +668,27 @@ await test('panel API: import two projects, read tree/file, refresh new file, re
   assert.equal(tree.status, 200);
   assert.ok(tree.json.nodes.some((node) => node.path === 'src/engine.c'));
 
+  const capabilities = await callApi(handler, { url: `/api/codementor/capabilities?projectId=${secondImport.json.project.id}` });
+  assert.equal(capabilities.status, 200);
+  assert.ok(capabilities.json.nodes.length >= 1);
+
+  const teach = await callApi(handler, {
+    method: 'POST', url: '/api/codementor/teaching/module', headers: writeHeaders,
+    body: { projectId: secondImport.json.project.id, moduleId: view.json.view.home.modules[0].moduleId },
+  });
+  assert.equal(teach.status, 200);
+  assert.equal(teach.json.teaching.source, 'fallback');
+  assert.ok(!/包含.*等符号/.test(teach.json.teaching.summary));
+
+  const firstSymbol = view.json.view.explorer.modules.flatMap((module) => module.symbols)[0];
+  const explain = await callApi(handler, {
+    method: 'POST', url: '/api/codementor/explain/function', headers: writeHeaders,
+    body: { projectId: secondImport.json.project.id, symbolId: firstSymbol.id },
+  });
+  assert.equal(explain.status, 200);
+  assert.ok(explain.json.explanation.oneLine.length > 10);
+  assert.equal(explain.json.explanation.source, 'fallback');
+
   const file = await callApi(handler, { url: `/api/codementor/file?projectId=${secondImport.json.project.id}&path=src/engine.c&start=1&end=6` });
   assert.equal(file.status, 200);
   assert.equal(file.json.lines.length, 6);
@@ -829,6 +853,122 @@ await test('semantic reviewer parses structured JSON, validates evidence and fol
   assert.ok(!JSON.stringify(captured).includes('CodeMentor 项目源码学习'), 'no full repo or system prompt leak');
 });
 
+/* ------------------------------------------------------------ v3 content */
+
+await test('v3 capabilities: source-grounded capabilities, not directory mirrors', async () => {
+  const knowledge = (await service.ensureKnowledge({ path: workProject })).knowledge;
+  const capabilities = buildCapabilities(knowledge);
+  assert.ok(capabilities.nodes.length >= 2);
+  assert.ok(capabilities.nodes.length <= 6);
+  const moduleNames = new Set(knowledge.modules.map((module) => module.name));
+  const knownFiles = new Set(knowledge.symbols.map((symbol) => symbol.file));
+  for (const capability of capabilities.nodes) {
+    assert.ok(capability.title.length > 4);
+    assert.ok(!moduleNames.has(capability.title), `capability title mirrors a module: ${capability.title}`);
+    assert.ok(!/包含.*等符号/.test(capability.purpose));
+    assert.ok(['verified', 'inferred', 'unknown'].includes(capability.evidenceLevel));
+    assert.ok(capability.sources.length >= 1);
+    for (const source of capability.sources) {
+      assert.ok(knownFiles.has(source.file), `unknown capability source ${source.file}`);
+      assert.ok(source.line > 0);
+    }
+  }
+  assert.ok(capabilities.flow.length >= 1);
+  assert.ok(capabilities.flow.every((step) => capabilities.nodes.some((node) => node.id === step.id)));
+
+  const narratives = buildModuleNarratives(knowledge, capabilities);
+  for (const narrative of narratives) {
+    assert.ok(!/包含.*等符号/.test(narrative.summary), `symbol dump leaked into summary: ${narrative.summary}`);
+    assert.notEqual(narrative.role, '程序入口与主循环');
+    assert.ok(narrative.summary.length > 8);
+  }
+});
+
+await test('v3 lessons: no unrelated chain fallback; each lesson has unique activity', async () => {
+  const knowledge = (await service.ensureKnowledge({ path: workProject })).knowledge;
+  const capabilities = buildCapabilities(knowledge);
+  const lessons = buildLessons(knowledge, { capabilities });
+  assert.ok(lessons.length >= 1);
+  const questions = new Set();
+  for (const lesson of lessons) {
+    assert.ok(!lesson.title.startsWith('读懂 '), `old generic lesson title: ${lesson.title}`);
+    assert.ok(lesson.expectedOutcome.length > 10);
+    assert.ok(lesson.walkthrough.length >= 3);
+    assert.ok(lesson.checkQuestions.length >= 1);
+    assert.ok(lesson.microTask?.action.length > 5);
+    assert.ok(lesson.acceptance.length >= 2);
+    assert.ok(lesson.next);
+    questions.add(lesson.checkQuestions[0]);
+    if (!lesson.capability) {
+      assert.ok(!lesson.walkthrough.some((step) => step.kind === 'trace'), `unrelated chain used for ${lesson.module.name}`);
+    }
+  }
+  if (lessons.length >= 2) assert.ok(questions.size >= 2, 'lessons reuse the same understanding question');
+});
+
+await test('v3 teaching: deterministic fallback, model JSON validated, cache keyed by evidence', async () => {
+  const knowledge = (await service.ensureKnowledge({ path: workProject })).knowledge;
+  const capabilities = buildCapabilities(knowledge);
+  const module = knowledge.modules.find((item) => item.name === 'src');
+  const fallback = await moduleTeaching({ knowledge, module, capabilities, reviewer: null });
+  assert.equal(fallback.source, 'fallback');
+  assert.ok(!/包含.*等符号/.test(fallback.summary));
+  assert.ok(fallback.note.includes('未使用模型'));
+
+  let calls = 0;
+  const reviewer = {
+    available: () => true,
+    modelKey: () => 'fake/model',
+    complete: async () => {
+      calls += 1;
+      return {
+        ok: true,
+        model: { provider: 'fake', model: 'fake' },
+        text: JSON.stringify({
+          summary: '这个功能把控制算法的目标值和反馈变成执行器动作。',
+          responsibility: '维持闭环控制。',
+          scenario: '操作员设定目标速度后持续运行。',
+          inputs: '目标值与反馈',
+          outputs: '控制量',
+          failure: '反馈丢失时需要保护，待核实。',
+          confidence: 'inferred',
+          evidence: [{ file: 'src/engine.c', line: 20 }, { file: 'no/such.c', line: 1 }],
+        }),
+      };
+    },
+  };
+  const first = await moduleTeaching({ knowledge, module, capabilities, reviewer, readSnippet: async () => '20  pid_compute(...)' });
+  assert.equal(first.source, 'model');
+  assert.equal(first.summary.includes('符号'), false);
+  assert.equal(first.evidence.length, 1);
+  assert.ok(first.rejectedEvidence.includes('no/such.c:1'));
+  const second = await moduleTeaching({ knowledge, module, capabilities, reviewer, readSnippet: async () => '' });
+  assert.equal(second.cached, true);
+  assert.equal(calls, 1, 'cached teaching must not call the model twice');
+  const record = knowledge.files.find((file) => file.path === 'src/engine.c');
+  record.mtimeMs += 1;
+  await moduleTeaching({ knowledge, module, capabilities, reviewer, readSnippet: async () => '' });
+  assert.equal(calls, 2, 'evidence change must invalidate the teaching cache');
+});
+
+await test('v3 practice: staged observe/locate/reproduce/small-change/verify with honest blocking', async () => {
+  const knowledge = (await service.ensureKnowledge({ path: workProject })).knowledge;
+  const capabilities = buildCapabilities(knowledge);
+  const generated = generateTasks(knowledge);
+  const { buildPracticeView } = await import('../lib/mentor.js');
+  const practice = buildPracticeView(knowledge, generated.tasks, capabilities);
+  assert.deepEqual(practice.stages.map((stage) => stage.stage), ['A', 'B', 'C', 'D', 'E']);
+  assert.equal(practice.defaultStage, 'A');
+  for (const stage of practice.stages) {
+    assert.ok(stage.title.length > 8);
+    assert.ok(stage.steps.length >= 1);
+    assert.ok(stage.acceptance.length >= 1);
+  }
+  assert.equal(practice.stages[0].blocked, false, 'fixture has an executable node build command');
+  assert.ok(practice.stages[3].candidates.every((task) => task.confidence !== 'confirmed' || task.kind === 'testing'));
+  assert.ok(practice.stages[3].candidates.every((task) => task.confidenceLabel.includes('候选') || task.confidenceLabel.includes('已确认')));
+});
+
 /* ------------------------------------------------------------ real repository */
 
 const realExists = await stat(realProject).then((info) => info.isDirectory()).catch(() => false);
@@ -950,6 +1090,65 @@ await test('real repository: practice plan is honest about an unavailable Keil b
   const brief = await realService.practice({ path: realProject, action: 'brief', task_id: list.tasks[0].id, mode: 'coop' }, { signal: new AbortController().signal });
   assert.equal(brief.ok, true);
   assert.ok(brief.task.invariants.length >= 2);
+});
+
+await test('real repository v3: capability-first home, differentiated lessons, blocked environment', async () => {
+  if (!realExists) {
+    console.log('   (skipped: real project not available)');
+    return;
+  }
+  const ctx = { get: () => undefined, effect: (fn) => fn(), logger: {} };
+  const realService = new CodeMentorService(ctx, { dataDir: realDataDir });
+  const projects = await realService.listProjects();
+  const project = projects.find((item) => item.analyzed) || projects[0];
+  assert.ok(project);
+  const { knowledge } = await realService.projectKnowledge(project.id);
+  const capabilities = buildCapabilities(knowledge);
+  const titles = capabilities.nodes.map((node) => node.title);
+  assert.ok(titles.some((title) => title.includes('命令')), JSON.stringify(titles));
+  assert.ok(titles.some((title) => title.includes('控制')), JSON.stringify(titles));
+  assert.ok(titles.some((title) => title.includes('启动')), JSON.stringify(titles));
+  for (const node of capabilities.nodes) {
+    assert.ok(!knowledge.modules.some((module) => module.name === node.title), `capability mirrors a module: ${node.title}`);
+    assert.ok(node.sources.length >= 1);
+    assert.ok(node.sources.every((source) => knowledge.files.some((file) => file.path === source.file) || knowledge.symbols.some((symbol) => symbol.file === source.file)));
+  }
+
+  const view = buildUiView(knowledge, { projectId: project.id });
+  assert.ok(view.home.capabilities.length >= 3);
+  assert.ok(view.home.flow.length >= 1);
+  assert.ok(view.home.modules.every((module) => !/包含.*等符号/.test(module.summary)));
+  assert.ok(view.lessons.items.every((lesson) => !lesson.title.startsWith('读懂 ')));
+  const coreInc = view.lessons.items.find((lesson) => lesson.module.name === 'Core/Inc');
+  assert.ok(coreInc);
+  assert.equal(coreInc.capability, null);
+  assert.ok(!coreInc.walkthrough.some((step) => step.kind === 'trace'), 'Core/Inc must not borrow an unrelated chain');
+  assert.ok(view.practice.stages.length === 5);
+  assert.equal(view.practice.stages[0].blocked, true, 'Keil build must be honestly blocked');
+  assert.match(view.practice.stages[0].blockedReason, /构建|运行|入口/);
+  assert.ok(view.practice.stages[3].candidates.every((task) => task.confidence === 'candidate' || task.confidence === 'confirmed-gap'));
+
+  const symbol = knowledge.symbols.find((item) => item.name === 'cmd_dispatch');
+  const explanation = await realService.explainSymbol(project.id, symbol.id);
+  assert.equal(explanation.ok, true);
+  assert.equal(explanation.explanation.source, 'fallback');
+  assert.ok(explanation.explanation.oneLine.length > 10);
+  assert.ok(explanation.explanation.when.includes('cmd_dispatch') || explanation.explanation.when.includes('调用方'));
+  assert.ok(Array.isArray(explanation.technical.callers));
+
+  const prototype = knowledge.symbols.find((item) => item.name === 'cmd_dispatch' && item.kind === 'prototype');
+  if (prototype) {
+    const resolved = await realService.explainSymbol(project.id, prototype.id);
+    assert.equal(resolved.symbol.kind, 'function');
+    assert.match(resolved.symbol.file, /cmd_handler\.c$/);
+    assert.ok(resolved.technical.callers.some((caller) => caller.line === 249), 'caller location must be the real call site');
+  }
+
+  const module = knowledge.modules.find((item) => item.name === 'Core/Src');
+  const teaching = await realService.teachModule(project.id, module.id);
+  assert.equal(teaching.ok, true);
+  assert.equal(teaching.teaching.source, 'fallback');
+  assert.ok(!/包含.*等符号/.test(teaching.teaching.summary));
 });
 
 console.log(`\n${passed} passed, ${failures.length} failed.`);

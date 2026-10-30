@@ -266,11 +266,75 @@ window.__ModuleLoader__.load({
       );
     }
 
+    function CapabilityCard({ capability, onOpenSource, moduleForTeaching, onTeach, teaching }) {
+      const [open, setOpen] = useState(false);
+      const details = open ? h('div', { style: { marginTop: 8 } },
+        h('dl', { className: 'cm-kv' },
+          h('dt', null, '触发'), h('dd', null, capability.trigger),
+          h('dt', null, '处理'), h('dd', null, capability.process),
+          h('dt', null, '失败'), h('dd', null, capability.failure),
+          h('dt', null, '上游'), h('dd', null, (capability.upstream || []).join('、') || '未发现'),
+          h('dt', null, '下游'), h('dd', null, (capability.downstream || []).join('、') || '未发现'),
+        ),
+        capability.sources?.length ? h('div', null,
+          h('h4', null, '涉及源码'),
+          capability.sources.map((source, index) => h('button', {
+            key: `${source.file}:${source.line}:${index}`, type: 'button', className: 'cm-link', style: { display: 'block' },
+            onClick: () => onOpenSource(source.file, source.line),
+          }, `${cite(source)}${source.symbol ? ` · ${source.symbol}` : ''}`)),
+        ) : null,
+        moduleForTeaching ? h('div', { className: 'cm-row', style: { marginTop: 6 } },
+          h(Btn, { small: true, onClick: () => onTeach(moduleForTeaching, capability.id) }, teaching?.loading ? '生成中…' : '让导师解释这个功能'),
+        ) : null,
+        teaching?.data ? h('div', { className: 'cm-review-block' },
+          h('div', { className: 'cm-row cm-between' },
+            h('strong', null, teaching.data.source === 'model' ? '导师讲解（模型）' : '导师讲解（证据版）'),
+            h(Confidence, { value: teaching.data.confidence }),
+          ),
+          h('p', null, teaching.data.summary),
+          h('p', { className: 'cm-muted' }, teaching.data.scenario),
+          teaching.data.note ? h('div', { className: 'cm-muted' }, teaching.data.note) : null,
+        ) : null,
+        teaching?.error ? h('div', { className: 'cm-warn' }, teaching.error.message) : null,
+      ) : null;
+      return h('div', { className: 'cm-card', style: { marginBottom: 0, background: 'var(--dsw-alias-bg-base)' } },
+        h('div', { className: 'cm-row cm-between' },
+          h('strong', null, capability.title),
+          h(Confidence, { value: capability.evidenceLevel }),
+        ),
+        h('p', { style: { marginTop: 5 } }, capability.purpose),
+        h('div', { className: 'cm-muted' }, `${capability.input} → ${capability.output}`),
+        h('div', { className: 'cm-row', style: { marginTop: 6 } },
+          h(Btn, { small: true, variant: 'ghost', onClick: () => setOpen((current) => !current) }, open ? '收起详情' : '查看实现'),
+          capability.sources?.[0] ? h(Btn, { small: true, onClick: () => onOpenSource(capability.sources[0].file, capability.sources[0].line) }, '打开源码') : null,
+        ),
+        details,
+      );
+    }
+
     function HomeTab({ view, openSource, startLesson, startInterview }) {
       const home = view.home;
-      const introduction = home?.introduction?.text || '这个项目还没有可读的简介；先看入口与模块职责。';
+      const introduction = home?.introduction?.text || '这个项目还没有可读的简介；先看功能卡与源码入口。';
+      const capabilities = home?.capabilities || [];
+      const flow = home?.flow || [];
       const modules = home?.modules || [];
       const findings = home?.findings || [];
+      const [teaching, setTeaching] = useState({});
+
+      const teach = async (module, capabilityId = '') => {
+        if (!module) return;
+        setTeaching((current) => ({ ...current, [module.moduleId]: { ...(current[module.moduleId] || {}), loading: true, error: null } }));
+        try {
+          const data = await api('/api/codementor/teaching/module', {
+            method: 'POST',
+            body: { projectId: view.meta.projectId, moduleId: module.moduleId, capabilityId, level: 'beginner' },
+          });
+          setTeaching((current) => ({ ...current, [module.moduleId]: { loading: false, data: data.teaching, error: null } }));
+        } catch (error) {
+          setTeaching((current) => ({ ...current, [module.moduleId]: { loading: false, error, data: null } }));
+        }
+      };
+
       return h('div', null,
         h('div', { className: 'cm-card' },
           h('h2', null, view.meta.name),
@@ -278,11 +342,41 @@ window.__ModuleLoader__.load({
           h('div', { className: 'cm-row' },
             h(Btn, { variant: 'primary', disabled: !home?.startLesson, onClick: () => home?.startLesson && startLesson(home.startLesson.lessonId) }, '开始第一课'),
             h(Btn, { onClick: () => startInterview('') }, '先做一轮面试'),
-            home?.startLesson ? h('span', { className: 'cm-muted' }, `第一课：${home.startLesson.title}`) : null,
+            home?.startLesson ? h('span', { className: 'cm-muted' }, `第一课：${home.startLesson.lessonTitle || home.startLesson.title}`) : null,
           ),
         ),
         h('div', { className: 'cm-card' },
-          h('h3', null, '先做这三件事'),
+          h('h3', null, '能完成什么事'),
+          h('p', { className: 'cm-muted' }, home?.capabilityNote || '功能节点由真实符号与调用点组合；业务解释标注为推断或待确认。'),
+          h('div', { className: 'cm-grid' },
+            capabilities.slice(0, 6).map((capability) => h(CapabilityCard, {
+              key: capability.id,
+              capability,
+              onOpenSource: openSource,
+              moduleForTeaching: modules.find((module) => (capability.relatedModules || []).includes(module.name)) || null,
+              teaching: teaching[modules.find((module) => (capability.relatedModules || []).includes(module.name))?.moduleId],
+              onTeach: teach,
+            })),          ),
+          !capabilities.length ? h('p', { className: 'cm-muted' }, '没有找到足够证据形成功能节点；可在技术详情中查看源码组织。') : null,
+        ),
+        h('div', { className: 'cm-card' },
+          h('h3', null, '系统如何完成一件典型的事'),
+          flow.length
+            ? h('div', { className: 'cm-steps' }, flow.map((step, index) => h('div', { key: step.id, className: 'cm-step' },
+              h('div', { className: 'cm-step-no' }, index + 1),
+              h('div', { className: 'cm-step-body' },
+                h('div', { className: 'cm-row cm-between' },
+                  h('strong', null, step.title),
+                  h(Confidence, { value: step.evidenceLevel }),
+                ),
+                h('div', { className: 'cm-muted' }, step.purpose),
+                step.sources?.[0] ? h('button', { type: 'button', className: 'cm-link', onClick: () => openSource(step.sources[0].file, step.sources[0].line) }, cite(step.sources[0])) : null,
+              ),
+            )))
+            : h('p', { className: 'cm-muted' }, '当前没有可确认的功能流程；先阅读功能卡中的源码入口。'),
+        ),
+        h('div', { className: 'cm-card' },
+          h('h3', null, '新人应该从哪开始'),
           (home?.gettingStarted || []).map((step) => h('div', { key: step.id, className: `cm-step${step.done ? ' done' : ''}` },
             h('div', { className: 'cm-step-no' }, step.done ? '✓' : step.order),
             h('div', { className: 'cm-step-body' },
@@ -301,81 +395,45 @@ window.__ModuleLoader__.load({
             ),
           )),
         ),
-        h('div', { className: 'cm-card' },
-          h('h3', null, '系统如何工作'),
-          (view.overview.chain?.steps || []).length
-            ? h('div', null,
-              (view.overview.chain.steps || []).slice(0, 6).map((step) => h('div', { key: `${step.step}-${step.to}`, className: 'cm-step' },
-                h('div', { className: 'cm-step-no' }, step.step),
-                h('div', { className: 'cm-step-body' },
-                  h('div', null, h('span', { className: 'cm-mono' }, step.from), ' → ', h('span', { className: 'cm-mono' }, step.to)),
-                  h('button', { type: 'button', className: 'cm-link', onClick: () => openSource(step.file, step.line) }, cite({ file: step.file, line: step.line })),
-                ),
-              )),
-              h('div', { className: 'cm-note', style: { marginTop: 6 } }, '这是有源码行号支撑的主调用链；未解析的外部调用不会被当成事实。'),
-            )
-            : h('p', { className: 'cm-muted' }, '还没有构建出可核对的调用链。打开源码后沿调用点阅读。'),
-          view.overview.architecture?.mermaid
-            ? h('details', { style: { marginTop: 8 } },
-              h('summary', { className: 'cm-muted' }, '查看 Mermaid 架构图（原始文本）'),
-              h('pre', { className: 'cm-code', style: { maxHeight: 220, overflow: 'auto' } }, view.overview.architecture.mermaid),
-            )
-            : null,
-        ),
-        h('div', { className: 'cm-card' },
-          h('h3', null, '核心模块'),
-          h('div', { className: 'cm-grid' },
-            modules.slice(0, 9).map((module) => h('div', { key: module.moduleId, className: 'cm-card', style: { marginBottom: 0, background: 'var(--dsw-alias-bg-base)' } },
-              h('div', { className: 'cm-row cm-between' },
-                h('strong', null, module.name),
-                h(Confidence, { value: module.confidence }),
-              ),
-              h('p', { style: { marginTop: 5 } }, module.summary),
-              h('div', { className: 'cm-muted' }, `输入：${module.inputs}`),
-              h('div', { className: 'cm-muted' }, `输出：${module.outputs}`),
-              h('div', { className: 'cm-row', style: { marginTop: 6 } },
-                module.startHere ? h(Btn, { small: true, onClick: () => openSource(module.startHere.file, module.startHere.line) }, '从这里开始') : null,
-                h(Btn, {
-                  small: true, variant: 'ghost',
-                  onClick: () => {
-                    const lesson = (view.lessons?.items || []).find((item) => item.moduleId === module.moduleId);
-                    if (lesson) startLesson(lesson.lessonId);
-                    else if (module.startHere) openSource(module.startHere.file, module.startHere.line);
-                  },
-                }, '开始学习'),
-              ),
-            )),
-          )),
-        h('div', { className: 'cm-card' },
-          h('h3', null, '核心发现与源码依据'),
-          findings.map((finding) => h('div', { key: finding.id, className: 'cm-review-block' },
-            h('div', { className: 'cm-row cm-between' },
-              h('strong', null, finding.title),
-              h(Confidence, { value: finding.confidence }),
+        h('details', { className: 'cm-card' },
+          h('summary', { className: 'cm-link' }, '深入技术细节：源码架构、模块职责与证据状态'),
+          h('div', { style: { marginTop: 10 } },
+            h('h3', null, '源码架构（目录/模块）'),
+            h('div', { className: 'cm-chips' },
+              ...(modules || []).slice(0, 8).map((module) => h(Chip, { key: module.moduleId }, module.name)),
             ),
-            h('p', { style: { marginTop: 5 } }, finding.text),
-            finding.evidence?.length
-              ? h('div', { className: 'cm-row' },
-                h('span', { className: 'cm-muted' }, '依据：'),
-                h('button', {
-                  type: 'button', className: 'cm-link',
-                  onClick: () => openSource(finding.evidence[0].file, finding.evidence[0].line, finding.action?.chainId ? { chainId: finding.action.chainId } : {}),
-                }, cite(finding.evidence[0])),
-                h('span', { className: 'cm-muted' }, finding.confidenceLabel),
-              )
-              : h('div', { className: 'cm-muted' }, '没有可引用的源码位置，这条属于待验证。'),
-          )),
-          h('details', { style: { marginTop: 8 } },
-            h('summary', { className: 'cm-muted' }, '分析详情与全部证据状态'),
-            h('div', { className: 'cm-muted', style: { marginTop: 6 } },
-              (view.overview.claims || []).slice(0, 20).map((claim) => h('div', { key: claim.id, style: { padding: '4px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
-                h('div', { className: 'cm-row cm-between' },
-                  h('span', null, claim.text),
-                  h('span', { className: 'cm-row' },
-                    claim.stale ? h(Chip, { tone: 'warn' }, '已过期') : null,
-                    h(Confidence, { value: claim.kind }),
-                  ),
+            view.overview.architecture?.mermaid ? h('details', null,
+              h('summary', { className: 'cm-muted' }, 'Mermaid 架构图'),
+              h('pre', { className: 'cm-code', style: { maxHeight: 220, overflow: 'auto' } }, view.overview.architecture.mermaid),
+            ) : null,
+            h('div', { className: 'cm-grid', style: { marginTop: 10 } },
+              modules.map((module) => h('div', { key: module.moduleId, className: 'cm-card', style: { marginBottom: 0, background: 'var(--dsw-alias-bg-base)' } },
+                h('div', { className: 'cm-row cm-between' }, h('strong', null, module.name), h(Confidence, { value: module.confidence })),
+                h('p', { style: { marginTop: 4 } }, module.summary),
+                h('div', { className: 'cm-muted' }, module.responsibility),
+                h('div', { className: 'cm-row', style: { marginTop: 6 } },
+                  module.startHere ? h(Btn, { small: true, onClick: () => openSource(module.startHere.file, module.startHere.line) }, '从这里开始') : null,
+                  h(Btn, { small: true, variant: 'ghost', onClick: () => teach(module) }, teaching[module.moduleId]?.loading ? '生成中…' : '导师讲解'),
                 ),
+                teaching[module.moduleId]?.data ? h('div', { className: 'cm-review-block' },
+                  h('div', { className: 'cm-row cm-between' }, h('strong', null, '导师讲解'), h(Confidence, { value: teaching[module.moduleId].data.confidence })),
+                  h('p', null, teaching[module.moduleId].data.summary),
+                  h('p', { className: 'cm-muted' }, teaching[module.moduleId].data.scenario),
+                  teaching[module.moduleId].data.note ? h('div', { className: 'cm-muted' }, teaching[module.moduleId].data.note) : null,
+                ) : null,
+                teaching[module.moduleId]?.error ? h('div', { className: 'cm-warn' }, teaching[module.moduleId].error.message) : null,
+              )),
+            ),
+            h('h3', { style: { marginTop: 14 } }, '核心发现与源码依据'),
+            findings.map((finding) => h('div', { key: finding.id, className: 'cm-review-block' },
+              h('div', { className: 'cm-row cm-between' }, h('strong', null, finding.title), h(Confidence, { value: finding.confidence })),
+              h('p', { style: { marginTop: 4 } }, finding.text),
+              finding.evidence?.[0] ? h('button', { type: 'button', className: 'cm-link', onClick: () => openSource(finding.evidence[0].file, finding.evidence[0].line) }, cite(finding.evidence[0])) : null,
+            )),
+            h('details', null,
+              h('summary', { className: 'cm-muted' }, '全部证据状态与内部分析 claims'),
+              (view.overview.claims || []).slice(0, 20).map((claim) => h('div', { key: claim.id, style: { padding: '4px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
+                h('div', { className: 'cm-row cm-between' }, h('span', null, claim.text), h(Confidence, { value: claim.kind })),
                 claim.evidence?.length ? h('div', { className: 'cm-mono' }, claim.evidence.slice(0, 3).map(cite).join('、')) : null,
               )),
             ),
@@ -425,6 +483,10 @@ window.__ModuleLoader__.load({
         h('div', { className: 'cm-side' },
           h('div', { className: 'cm-card' },
             h('h3', null, `学习路线（${view.lessons?.progress?.completed || 0}/${lessons.length} 完成）`),
+            (view.lessons?.route || []).map((phase) => h('div', { key: phase.id, className: 'cm-row', style: { marginBottom: 4 } },
+              h(Chip, { tone: phase.blocked ? 'warn' : '' }, phase.title),
+              h('span', { className: 'cm-muted' }, phase.detail),
+            )),
             lessons.map((item) => h('div', {
               key: item.lessonId,
               className: `cm-lesson${item.lessonId === lesson?.lessonId ? ' active' : ''}`,
@@ -444,43 +506,63 @@ window.__ModuleLoader__.load({
           lesson ? h(React.Fragment, null,
             h('div', { className: 'cm-card' },
               h('div', { className: 'cm-row cm-between' },
-                h('h2', { style: { margin: 0 } }, lesson.title),
+                h('h2', { style: { margin: 0 } }, lesson.lessonTitle || lesson.title),
                 h(Chip, null, lesson.priority),
               ),
-              h('p', { style: { marginTop: 8 } }, lesson.whyLearn),
+              h('p', { style: { marginTop: 8 } }, lesson.why || lesson.whyLearn),
               h('div', { className: 'cm-chips' },
                 ...lesson.prerequisites.map((item) => h(Chip, { key: item }, `前置：${item}`)),
                 h(Chip, null, `${lesson.estimatedMinutes} 分钟`),
+                lesson.capability ? h(Chip, { tone: lesson.capability.evidenceLevel === 'verified' ? 'ok' : 'warn' }, lesson.capability.title) : null,
               ),
-              h('h4', null, '读完能做什么'),
-              h('ul', { className: 'cm-list' }, lesson.learningObjectives.map((item, index) => h('li', { key: index }, item))),
+              h('h4', null, '本课完成后能做什么'),
+              h('p', null, lesson.expectedOutcome || lesson.learningObjectives?.[0] || ''),
+              h('div', { className: 'cm-note' }, lesson.conceptExplanation || ''),
+              h('ul', { className: 'cm-list' }, (lesson.learningObjectives || []).map((item, index) => h('li', { key: index }, item))),
             ),
             h('div', { className: 'cm-card' },
-              h('h3', null, '学习步骤'),
-              lesson.steps.map((step, index) => h('div', { key: `${step.type}-${index}`, className: 'cm-step' },
+              h('h3', null, '动手步骤'),
+              (lesson.walkthrough || []).map((step, index) => h('div', { key: `${step.kind}-${index}`, className: 'cm-step' },
+                h('div', { className: 'cm-step-no' }, index + 1),
+                h('div', { className: 'cm-step-body' },
+                  h('div', { className: 'cm-row cm-between' }, h('strong', null, step.title), h(Chip, null, step.kind)),
+                  h('p', { style: { marginTop: 3 } }, step.action),
+                  step.expected ? h('div', { className: 'cm-muted' }, `预期：${step.expected}`) : null,
+                  step.evidence?.length ? h('div', { className: 'cm-row', style: { marginTop: 3 } },
+                    ...step.evidence.slice(0, 3).map((evidence) => h('button', { key: cite(evidence), type: 'button', className: 'cm-link', onClick: () => openSource(evidence.file, evidence.line) }, cite(evidence))),
+                  ) : null,
+                ),
+              )),
+              !lesson.walkthrough?.length ? h('div', null, lesson.steps.map((step, index) => h('div', { key: `${step.type}-${index}`, className: 'cm-step' },
                 h('div', { className: 'cm-step-no' }, index + 1),
                 h('div', { className: 'cm-step-body' },
                   h('strong', null, step.title),
                   step.content ? h('p', { style: { marginTop: 3 } }, step.content) : null,
                   step.prompt ? h('p', { style: { marginTop: 3 } }, step.prompt) : null,
                   step.instruction ? h('p', { style: { marginTop: 3 } }, step.instruction) : null,
-                  step.target ? h('button', { type: 'button', className: 'cm-link', onClick: () => openSource(step.target.file, step.target.line) }, `打开 ${cite(step.target)}`, ) : null,
-                  step.steps?.length ? h('div', null, step.steps.map((item) => h('div', { key: `${item.step}-${item.to}` },
-                    h('button', { type: 'button', className: 'cm-link', onClick: () => openSource(item.file, item.line, { chainId: step.chainId }) }, `${item.from} → ${item.to}（${cite({ file: item.file, line: item.line })}）`),
-                  ))) : null,
-                  step.type === 'explain' ? h('div', { className: 'cm-row', style: { marginTop: 5 } },
-                    h(Btn, { small: true, onClick: () => startInterview(lesson.module.name) }, '去面试间回答'),
-                  ) : null,
-                  step.type === 'verify' ? h('div', { className: 'cm-row', style: { marginTop: 5 } },
-                    step.planId ? h(Btn, { small: true, onClick: () => openSource(step.target?.file || lesson.startHere.file, step.target?.line || lesson.startHere.line) }, '查看验证文件') : null,
-                    h(Btn, { small: true, variant: 'ghost', onClick: () => startInterview(lesson.module.name) }, '用面试题检验'),
-                  ) : null,
+                  step.target ? h('button', { type: 'button', className: 'cm-link', onClick: () => openSource(step.target.file, step.target.line) }, `打开 ${cite(step.target)}`) : null,
                 ),
-              )),
+              ))) : null,
+            ),
+            h('div', { className: 'cm-grid-2' },
+              h('div', { className: 'cm-card' },
+                h('h3', null, '理解问题'),
+                h('ul', { className: 'cm-list' }, (lesson.checkQuestions || []).map((item, index) => h('li', { key: index }, item))),
+                h(Btn, { small: true, onClick: () => startInterview(lesson.module.name) }, '去面试间回答'),
+              ),
+              h('div', { className: 'cm-card' },
+                h('h3', null, '最小任务'),
+                h('p', null, lesson.microTask?.title || '按步骤完成一次观察与记录。'),
+                h('div', { className: 'cm-muted' }, lesson.microTask?.action || ''),
+                lesson.microTask?.acceptance ? h('div', { className: 'cm-note', style: { marginTop: 6 } }, `验收：${lesson.microTask.acceptance}`) : null,
+                lesson.next ? h('div', { style: { marginTop: 8 } },
+                  h(Btn, { small: true, onClick: () => lesson.next.type === 'lesson' ? setSelected(lesson.next.lessonId) : null }, lesson.next.type === 'lesson' ? `下一课：${lesson.next.title}` : '下一阶段：实践'),
+                ) : null,
+              ),
             ),
             h('div', { className: 'cm-card' },
               h('h3', null, '完成标准'),
-              h('ul', { className: 'cm-list' }, lesson.completionCriteria.map((item, index) => h('li', { key: index }, item))),
+              h('ul', { className: 'cm-list' }, (lesson.acceptance || lesson.completionCriteria || []).map((item, index) => h('li', { key: index }, item))),
               h('div', { className: 'cm-row', style: { marginTop: 10 } },
                 h(Btn, { variant: 'primary', disabled: busy === 'in_progress', onClick: () => update('in_progress') }, lesson.status === 'in_progress' ? '继续学习' : '开始本课'),
                 h(Btn, { onClick: () => setShowComplete((current) => !current) }, '标记完成'),
@@ -670,7 +752,10 @@ window.__ModuleLoader__.load({
           return;
         }
         try {
-          const data = await api(`/api/codementor/symbol?projectId=${encodeURIComponent(projectId)}&symbolId=${encodeURIComponent(found.id)}`);
+          const data = await api('/api/codementor/explain/function', {
+            method: 'POST',
+            body: { projectId, symbolId: found.id },
+          });
           setSymbolInfo(data);
         } catch (error) {
           setSymbolError(error);
@@ -754,14 +839,36 @@ window.__ModuleLoader__.load({
               ),
               symbolError ? h('div', { className: 'cm-warn' }, symbolError.message) : null,
               symbolInfo?.ok ? h('div', { className: 'cm-card' },
-                h('h3', null, `函数：${symbolInfo.symbol.name}`),
+                h('div', { className: 'cm-row cm-between' },
+                  h('h3', { style: { margin: 0 } }, `函数：${symbolInfo.symbol.name}`),
+                  h(Chip, { tone: symbolInfo.explanation?.source === 'model' ? 'ok' : 'warn' }, symbolInfo.explanation?.source === 'model' ? '导师语义解释' : '保守解释'),
+                ),
                 h('div', { className: 'cm-muted cm-mono' }, `${symbolInfo.symbol.file}:${symbolInfo.symbol.line}-${symbolInfo.symbol.endLine || symbolInfo.symbol.line}`),
-                symbolInfo.symbol.signature ? h('pre', { className: 'cm-code', style: { whiteSpace: 'pre-wrap', padding: 8 } }, symbolInfo.symbol.signature) : null,
-                h('h4', null, `调用方（${symbolInfo.callers.length}）`),
-                symbolInfo.callers.slice(0, 10).map((caller) => h('button', { key: `${caller.file}:${caller.line}`, type: 'button', className: 'cm-link', onClick: () => open(caller.file, caller.line) }, `${caller.name} — ${caller.file}:${caller.line}`)),
-                h('h4', null, `被调用方（${symbolInfo.callees.length}）`),
-                symbolInfo.callees.slice(0, 10).map((callee) => h('button', { key: `${callee.file}:${callee.line}`, type: 'button', className: 'cm-link', onClick: () => open(callee.file, callee.line) }, `${callee.name} — ${callee.file}:${callee.line}`)),
-                symbolInfo.module ? h('p', { className: 'cm-muted', style: { marginTop: 8 } }, `所属模块：${symbolInfo.module.name} · ${symbolInfo.module.summary}`) : null,
+                h('p', { style: { marginTop: 6 } }, symbolInfo.explanation?.oneLine),
+                h('dl', { className: 'cm-kv' },
+                  h('dt', null, '何时调用'), h('dd', null, symbolInfo.explanation?.when),
+                  h('dt', null, '输入输出'), h('dd', null, symbolInfo.explanation?.inputOutput),
+                  h('dt', null, '失败分支'), h('dd', null, symbolInfo.explanation?.failure),
+                  h('dt', null, '副作用'), h('dd', null, symbolInfo.explanation?.sideEffects),
+                  h('dt', null, '功能位置'), h('dd', null, symbolInfo.explanation?.relation),
+                ),
+                (symbolInfo.explanation?.steps || []).length ? h('div', null,
+                  h('h4', null, '执行步骤'),
+                  h('ul', { className: 'cm-list' }, symbolInfo.explanation.steps.map((step, index) => h('li', { key: index }, step))),
+                ) : null,
+                (symbolInfo.explanation?.uncertainties || []).length ? h('div', null,
+                  h('h4', null, '待核实'),
+                  h('ul', { className: 'cm-list' }, symbolInfo.explanation.uncertainties.map((item, index) => h('li', { key: index }, item))),
+                ) : null,
+                symbolInfo.explanation?.note ? h('div', { className: 'cm-note', style: { marginTop: 6 } }, symbolInfo.explanation.note) : null,
+                symbolInfo.technical ? h('details', { style: { marginTop: 8 } },
+                  h('summary', { className: 'cm-muted' }, '技术详情：调用方 / 被调用方'),
+                  h('h4', null, `调用方（${symbolInfo.technical.callers.length}）`),
+                  symbolInfo.technical.callers.slice(0, 10).map((caller) => h('button', { key: `${caller.file}:${caller.line}`, type: 'button', className: 'cm-link', onClick: () => open(caller.file, caller.line) }, `${caller.name} — ${caller.file}:${caller.line}`)),
+                  h('h4', null, `被调用方（${symbolInfo.technical.callees.length}）`),
+                  symbolInfo.technical.callees.slice(0, 10).map((callee) => h('button', { key: `${callee.file}:${callee.line}`, type: 'button', className: 'cm-link', onClick: () => open(callee.file, callee.line) }, `${callee.name} — ${callee.file}:${callee.line}`)),
+                  symbolInfo.technical.capability ? h('div', { className: 'cm-muted' }, `功能节点：${symbolInfo.technical.capability.title}（${symbolInfo.technical.capability.evidenceLevel}）`) : null,
+                ) : null,
               ) : null,
               h('div', { className: 'cm-code-wrap', ref: codeRef },
                 h('pre', { className: 'cm-code' },
@@ -820,27 +927,26 @@ window.__ModuleLoader__.load({
     }
 
     function PracticeTab({ view, openSource, showToast }) {
-      const [category, setCategory] = useState(view.practice.defaultCategory || 'understand');
-      const [selected, setSelected] = useState('');
+      const stages = view.practice.stages || [];
+      const [stageId, setStageId] = useState(view.practice.defaultStage || stages[0]?.stage || 'A');
+      const stage = stages.find((item) => item.stage === stageId) || stages[0] || null;
+      const [candidateId, setCandidateId] = useState('');
+      const candidate = (stage?.candidates || []).find((item) => item.id === candidateId) || (stage?.candidates || [])[0] || null;
       const [answer, setAnswer] = useState('');
       const [review, setReview] = useState(null);
       const [busy, setBusy] = useState(false);
       const [error, setError] = useState(null);
-      const categories = view.practice.categories || [];
-      const activeCategory = categories.find((item) => item.id === category) || categories[0];
-      const tasks = activeCategory?.tasks || [];
-      const task = tasks.find((item) => item.id === selected) || tasks[0] || null;
 
-      useEffect(() => { setSelected(tasks[0]?.id || ''); setReview(null); setAnswer(''); }, [category, view.meta.projectId]);
+      useEffect(() => { setCandidateId(''); setReview(null); setAnswer(''); }, [stageId, view.meta.projectId]);
 
       const submitReview = async () => {
-        if (!task) return;
+        if (!stage) return;
         setBusy(true);
         setError(null);
         try {
           const data = await api('/api/codementor/practice/review', {
             method: 'POST',
-            body: { projectId: view.meta.projectId, taskId: task.taskId || task.id, answer },
+            body: { projectId: view.meta.projectId, taskId: candidate?.id || stage.id, answer },
           });
           setReview(data);
         } catch (caught) {
@@ -850,61 +956,83 @@ window.__ModuleLoader__.load({
         }
       };
 
+      const entry = candidate?.target || stage?.codeEntry || stage?.steps?.flatMap((step) => step.evidence || [])[0] || null;
       return h('div', { className: 'cm-split' },
         h('div', { className: 'cm-side' },
           h('div', { className: 'cm-card' },
-            h('div', { className: 'cm-tabs', style: { paddingLeft: 0, marginBottom: 6 } },
-              categories.map((item) => h('button', {
-                key: item.id, type: 'button',
-                className: `cm-tab${item.id === category ? ' active' : ''}`,
-                onClick: () => setCategory(item.id),
-              }, `${item.label} ${item.tasks.length}`)),
-            ),
-            h('p', { className: 'cm-muted' }, activeCategory?.description),
-            tasks.length
-              ? tasks.map((item) => h('div', {
-                key: item.id, className: `cm-lesson${task?.id === item.id ? ' active' : ''}`,
-                onClick: () => { setSelected(item.id); setReview(null); setAnswer(''); },
-                role: 'button', tabIndex: 0,
-              },
-                h('div', { className: 'cm-name' }, item.title),
-                h('div', { className: 'cm-muted' }, `${item.kind} · ${item.readOnly ? '只读' : '需要修改'}`),
-              ))
-              : h('div', { className: 'cm-muted' }, '这个类别还没有任务。'),
+            h('h3', null, '实践路径：观察 → 定位 → 复现 → 小改 → 验证'),
+            stages.map((item) => h('div', {
+              key: item.stage,
+              className: `cm-lesson${item.stage === stageId ? ' active' : ''}`,
+              onClick: () => setStageId(item.stage),
+              role: 'button', tabIndex: 0,
+            },
+              h('div', { className: 'cm-row cm-between' },
+                h('div', { className: 'cm-name' }, `${item.stage} · ${item.stageTitle}`),
+                item.blocked ? h(Chip, { tone: 'warn' }, '阻塞') : null,
+              ),
+              h('div', { className: 'cm-muted' }, item.title),
+            )),
+            h('p', { className: 'cm-muted', style: { marginTop: 6 } }, view.practice.note),
           ),
+          (stage?.candidates || []).length ? h('div', { className: 'cm-card' },
+            h('h3', null, '候选改动（需先核实）'),
+            stage.candidates.map((item) => h('div', {
+              key: item.id,
+              className: `cm-lesson${candidate?.id === item.id ? ' active' : ''}`,
+              onClick: () => setCandidateId(item.id),
+              role: 'button', tabIndex: 0,
+            },
+              h('div', { className: 'cm-name' }, item.title),
+              h('div', { className: 'cm-row' }, h(Chip, null, item.kind), h(Confidence, { value: item.confidence })),
+            )),
+          ) : null,
         ),
         h('div', { className: 'cm-main' },
-          task ? h('div', { className: 'cm-card' },
+          stage ? h('div', { className: 'cm-card' },
             h('div', { className: 'cm-row cm-between' },
-              h('h2', { style: { margin: 0 } }, task.title),
+              h('h2', { style: { margin: 0 } }, `${stage.stage} · ${stage.title}`),
               h('span', { className: 'cm-row' },
-                h(Chip, null, task.readOnly ? '只读任务' : '修改任务'),
-                task.confidence ? h(Confidence, { value: task.confidence }) : null,
+                h(Chip, null, stage.readOnly ? '只读' : '需要授权'),
+                stage.confidence ? h(Confidence, { value: stage.confidence }) : null,
               ),
             ),
-            h('p', { style: { marginTop: 8 } }, task.objective),
-            h('dl', { className: 'cm-kv' },
-              h('dt', null, '场景'), h('dd', null, task.scenario || '—'),
-              h('dt', null, '为什么重要'), h('dd', null, task.whyItMatters || '—'),
-              h('dt', null, '目标位置'), h('dd', null, h('button', { type: 'button', className: 'cm-link', onClick: () => openSource(task.target.file, task.target.line) }, cite(task.target))),
-              h('dt', null, '完成标准'), h('dd', null, task.completion || '—'),
-              task.currentBehavior ? h(React.Fragment, null, h('dt', null, '当前行为'), h('dd', null, task.currentBehavior)) : null,
-              task.expectedBehavior ? h(React.Fragment, null, h('dt', null, '预期行为'), h('dd', null, task.expectedBehavior)) : null,
-              task.scope ? h(React.Fragment, null, h('dt', null, '修改范围'), h('dd', null, task.scope)) : null,
-            ),
-            task.confidence === 'candidate' ? h('div', { className: 'cm-warn' }, '这是静态扫描得到的候选风险，不等于已确认 Bug。先打开源码核对调用方与失败语义，再决定是否修改。') : null,
-            task.evidence?.length ? h('div', null,
-              h('h4', null, '源码证据'),
-              task.evidence.slice(0, 6).map((item) => h('button', { key: cite(item), type: 'button', className: 'cm-link', style: { display: 'block' }, onClick: () => openSource(item.file, item.line) }, cite(item))),
+            stage.blocked ? h('div', { className: 'cm-warn', style: { marginTop: 8 } }, `本阶段受阻：${stage.blockedReason || '环境或证据不足'}`) : null,
+            h('p', { style: { marginTop: 8 } }, stage.scenario),
+            h('h4', null, '前置条件'),
+            h('ul', { className: 'cm-list' }, (stage.prerequisites || []).map((item, index) => h('li', { key: index }, item))),
+            h('h4', null, '操作步骤'),
+            (stage.steps || []).map((step, index) => h('div', { key: index, className: 'cm-step' },
+              h('div', { className: 'cm-step-no' }, index + 1),
+              h('div', { className: 'cm-step-body' },
+                h('strong', null, step.action),
+                h('div', { className: 'cm-muted' }, `预期：${step.expected}`),
+                step.evidence?.length ? h('div', { className: 'cm-row', style: { marginTop: 3 } },
+                  ...step.evidence.slice(0, 4).map((evidence) => h('button', { key: cite(evidence), type: 'button', className: 'cm-link', onClick: () => openSource(evidence.file, evidence.line) }, cite(evidence))),
+                ) : null,
+              ),
+            )),
+            h('h4', null, '常见问题'),
+            h('ul', { className: 'cm-list' }, (stage.pitfalls || []).map((item, index) => h('li', { key: index }, item))),
+            h('h4', null, '验收标准'),
+            h('ul', { className: 'cm-list' }, (stage.acceptance || []).map((item, index) => h('li', { key: index }, item))),
+            candidate ? h('div', { className: 'cm-review-block' },
+              h('div', { className: 'cm-row cm-between' }, h('strong', null, candidate.title), h(Confidence, { value: candidate.confidence })),
+              h('p', { className: 'cm-muted' }, candidate.objective || ''),
+              candidate.evidence?.length ? h('div', null, candidate.evidence.slice(0, 4).map((evidence) => h('button', { key: cite(evidence), type: 'button', className: 'cm-link', style: { display: 'block' }, onClick: () => openSource(evidence.file, evidence.line) }, cite(evidence)))) : null,
             ) : null,
-            h('h4', null, '提交你的解释'),
+            entry ? h('div', { className: 'cm-row', style: { marginTop: 8 } },
+              h(Btn, { small: true, onClick: () => openSource(entry.file, entry.line) }, '打开入口源码'),
+            ) : null,
+            h('h4', { style: { marginTop: 12 } }, '提交你的观察/解释'),
             h('textarea', {
-              className: 'cm-textarea', value: answer, placeholder: '说明你确认了什么、改哪里、为什么不会破坏调用方，以及如何验证。',
+              className: 'cm-textarea', value: answer,
+              placeholder: '记录真实输入/输出、源码依据、你确认和仍然待核实的部分；没有运行就明确写环境阻塞。',
               onChange: (event) => setAnswer(event.target.value),
             }),
             h('div', { className: 'cm-row', style: { marginTop: 6 } },
               h(Btn, { variant: 'primary', disabled: busy || answer.trim().length < 10, onClick: submitReview }, busy ? '评审中…' : '请求导师评审'),
-              h(Btn, { variant: 'ghost', onClick: () => openSource(task.target.file, task.target.line) }, '查看源码'),
+              h(Btn, { variant: 'ghost', onClick: () => { if (entry) openSource(entry.file, entry.line); } }, '查看源码'),
             ),
             h(ErrorBox, { error }),
             review ? h('div', { className: 'cm-review-block' },
@@ -917,8 +1045,8 @@ window.__ModuleLoader__.load({
                 h('ul', { className: 'cm-list' }, (review.checklist || []).map((item) => h('li', { key: item }, item))),
               ),
             ) : null,
-            !task.readOnly ? h('div', { className: 'cm-note', style: { marginTop: 8 } }, '真正执行验证请在对话中使用 codementor_practice action=verify authorized=true；面板不会自动执行命令。') : null,
-          ) : h('div', { className: 'cm-card' }, h('p', { className: 'cm-muted' }, '选择左侧任务查看详情。')),
+            !stage.readOnly ? h('div', { className: 'cm-note', style: { marginTop: 8 } }, '真正修改/执行验证请在对话中使用 codementor_practice，并显式授权 authorized=true；面板不会自动改仓库或执行命令。') : null,
+          ) : h('div', { className: 'cm-card' }, h('p', { className: 'cm-muted' }, '选择左侧阶段查看任务。')),
         ),
       );
     }
