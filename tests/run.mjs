@@ -3,9 +3,11 @@ import { execFileSync } from 'node:child_process';
 import { cp, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 import { apply } from '../index.js';
+import { createApiHandler } from '../lib/api.js';
 import { buildSymbolIndex, findSymbols, scanProject, traceChain } from '../lib/analyze.js';
 import { languageOf, maskSource, matchBrace, SCHEMA_VERSION } from '../lib/core.js';
 import { KnowledgeStore } from '../lib/fs-scan.js';
@@ -24,6 +26,7 @@ import {
   generateTasks,
   suggestReferencePatch,
 } from '../lib/practice.js';
+import { createSemanticReviewer } from '../lib/reviewer.js';
 import { buildUiView, CodeMentorService } from '../lib/service.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -587,14 +590,243 @@ await test('tool execute surfaces cancellation as AbortError', async () => {
 
 await test('buildUiView exposes every panel section without scanning', async () => {
   const knowledge = (await service.ensureKnowledge({ path: workProject })).knowledge;
-  const view = buildUiView(knowledge);
+  const view = buildUiView(knowledge, { projectId: 'sample' });
   assert.equal(view.meta.name, knowledge.name);
   assert.ok(view.overview.modules.length >= 2);
   assert.ok(view.explorer.modules.length >= 2);
   assert.ok(Array.isArray(view.explorer.chains));
   assert.ok(view.practice.verificationPlan.steps.length >= 3);
-  assert.ok(view.interview.bank.count >= 5);
+  assert.ok(view.home.gettingStarted.length === 3);
+  assert.ok(view.home.modules.length >= 2);
+  assert.ok(view.lessons.items.length >= 1);
+  assert.ok(view.practice.categories.some((category) => category.id === 'understand' && category.tasks.length >= 1));
+  assert.equal(view.interview.status, 'idle');
+  assert.ok(!('bank' in view.interview), 'the private question bank must not be exposed');
   assert.ok(Array.isArray(view.overview.claims));
+  for (const lesson of view.lessons.items) {
+    assert.ok(lesson.steps.some((step) => step.type === 'read'));
+    assert.ok(lesson.steps.some((step) => step.type === 'explain'));
+    assert.ok(lesson.completionCriteria.length >= 2);
+  }
+});
+
+/* --------------------------------------------------------------- panel API */
+
+function callApi(handler, { method = 'GET', url, body, headers = {} } = {}) {
+  const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
+  req.method = method;
+  req.url = url;
+  req.headers = { host: '127.0.0.1:1234', ...headers };
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    const res = {
+      statusCode: 0,
+      headers: {},
+      setHeader(key, value) { this.headers[key] = value; },
+      end(chunk) {
+        if (chunk) chunks.push(Buffer.from(chunk));
+        const text = Buffer.concat(chunks).toString('utf8');
+        resolve({ status: this.statusCode, json: text ? JSON.parse(text) : null });
+      },
+    };
+    Promise.resolve(handler(req, res)).catch(reject);
+  });
+}
+
+const writeHeaders = {
+  origin: 'http://127.0.0.1:1234',
+  'x-codementor-action': '1',
+  'content-type': 'application/json',
+};
+
+await test('panel API: import two projects, read tree/file, refresh new file, reject traversal', async () => {
+  const apiData = path.join(tempRoot, 'api-data');
+  const apiService = new CodeMentorService({ get: () => undefined, effect: (fn) => fn(), logger: {} }, { dataDir: apiData });
+  const handler = createApiHandler(apiService);
+  const second = path.join(tempRoot, 'sample-project-2');
+  await cp(workProject, second, { recursive: true });
+
+  const first = await callApi(handler, { method: 'POST', url: '/api/codementor/projects/scan', headers: writeHeaders, body: { path: workProject } });
+  assert.equal(first.status, 200, JSON.stringify(first.json));
+  assert.ok(first.json.project.id);
+  const secondImport = await callApi(handler, { method: 'POST', url: '/api/codementor/projects/scan', headers: writeHeaders, body: { path: second } });
+  assert.equal(secondImport.status, 200);
+  assert.notEqual(secondImport.json.project.id, first.json.project.id);
+
+  const projects = await callApi(handler, { url: '/api/codementor/projects' });
+  assert.equal(projects.status, 200);
+  assert.ok(projects.json.projects.length >= 2);
+
+  const view = await callApi(handler, { url: `/api/codementor/project?id=${secondImport.json.project.id}` });
+  assert.equal(view.status, 200);
+  assert.equal(view.json.view.meta.projectId, secondImport.json.project.id);
+
+  const tree = await callApi(handler, { url: `/api/codementor/tree?projectId=${secondImport.json.project.id}` });
+  assert.equal(tree.status, 200);
+  assert.ok(tree.json.nodes.some((node) => node.path === 'src/engine.c'));
+
+  const file = await callApi(handler, { url: `/api/codementor/file?projectId=${secondImport.json.project.id}&path=src/engine.c&start=1&end=6` });
+  assert.equal(file.status, 200);
+  assert.equal(file.json.lines.length, 6);
+  assert.equal(file.json.lines[0].number, 1);
+
+  const traversal = await callApi(handler, { url: `/api/codementor/file?projectId=${secondImport.json.project.id}&path=../README.md` });
+  assert.equal(traversal.status, 403);
+  assert.equal(traversal.json.error.code, 'PATH_TRAVERSAL');
+
+  await writeFile(path.join(second, 'src', 'new_module.c'), 'int new_module(void) { return 1; }\n', 'utf8');
+  const refreshed = await callApi(handler, { method: 'POST', url: '/api/codementor/project/refresh', headers: writeHeaders, body: { projectId: secondImport.json.project.id } });
+  assert.equal(refreshed.status, 200);
+  const tree2 = await callApi(handler, { url: `/api/codementor/tree?projectId=${secondImport.json.project.id}` });
+  assert.ok(tree2.json.nodes.some((node) => node.path === 'src/new_module.c'), 'new file must appear after refresh');
+
+  const noHeader = await callApi(handler, { method: 'POST', url: '/api/codementor/projects/scan', headers: { 'content-type': 'application/json' }, body: { path: workProject } });
+  assert.equal(noHeader.status, 403);
+  const crossSite = await callApi(handler, { method: 'POST', url: '/api/codementor/projects/scan', headers: { ...writeHeaders, origin: 'https://evil.example' }, body: { path: workProject } });
+  assert.equal(crossSite.status, 403);
+  assert.equal(crossSite.json.error.code, 'ORIGIN_REJECTED');
+});
+
+await test('panel API: lesson completion requires file:line evidence', async () => {
+  const apiService = new CodeMentorService({ get: () => undefined, effect: (fn) => fn(), logger: {} }, { dataDir: path.join(tempRoot, 'api-data') });
+  const handler = createApiHandler(apiService);
+  const projects = await callApi(handler, { url: '/api/codementor/projects' });
+  const id = projects.json.projects[0].id;
+  const lessons = await callApi(handler, { url: `/api/codementor/lessons?projectId=${id}` });
+  assert.equal(lessons.status, 200);
+  assert.ok(lessons.json.items.length >= 1);
+  const lessonId = lessons.json.items[0].lessonId;
+
+  const missing = await callApi(handler, { method: 'POST', url: '/api/codementor/lesson/update', headers: writeHeaders, body: { projectId: id, lessonId, status: 'completed' } });
+  assert.equal(missing.status, 409);
+  assert.match(missing.json.reason, /依据|file:line/);
+
+  const done = await callApi(handler, {
+    method: 'POST', url: '/api/codementor/lesson/update', headers: writeHeaders,
+    body: { projectId: id, lessonId, status: 'completed', detail: '能解释入口和调用链', ref: 'src/main.c:5' },
+  });
+  assert.equal(done.status, 200);
+  assert.equal(done.json.lesson.status, 'completed');
+  const after = await callApi(handler, { url: `/api/codementor/lessons?projectId=${id}` });
+  assert.equal(after.json.items.find((item) => item.lessonId === lessonId).status, 'completed');
+});
+
+await test('panel API: interview hides answers, reviews answer, is idempotent and varies by answer', async () => {
+  const apiService = new CodeMentorService({ get: () => undefined, effect: (fn) => fn(), logger: {} }, { dataDir: path.join(tempRoot, 'api-data') });
+  const handler = createApiHandler(apiService);
+  const projects = await callApi(handler, { url: '/api/codementor/projects' });
+  const id = projects.json.projects[0].id;
+  const started = await callApi(handler, { method: 'POST', url: '/api/codementor/interview/start', headers: writeHeaders, body: { projectId: id, difficulty: 'mid', maxQuestions: 3 } });
+  assert.equal(started.status, 200, JSON.stringify(started.json));
+  const session = started.json.session;
+  assert.equal(session.status, 'asking');
+  assert.ok(session.current.prompt);
+  assert.ok(!('recommended' in session.current));
+  assert.ok(!('expectedFacts' in session.current));
+  assert.ok(!('rubric' in session.current));
+
+  const knowledge = (await apiService.projectKnowledge(id)).knowledge;
+  const bank = knowledge.interview.bank;
+  const base = bank.questions.find((question) => question.id === session.current.questionId);
+  const strongAnswer = [
+    '首先给出结论。',
+    ...base.rubric.flatMap((item) => item.keywords || []),
+    '其次结合真实源码行号说明调用链。',
+    '最后说明失败路径、验证方式与设计取舍。',
+  ].join(' ');
+
+  const first = await callApi(handler, {
+    method: 'POST', url: '/api/codementor/interview/answer', headers: writeHeaders,
+    body: { projectId: id, sessionId: session.sessionId, turnId: 'turn-aaaaaa', answer: strongAnswer },
+  });
+  assert.equal(first.status, 200, JSON.stringify(first.json));
+  assert.ok(first.json.review.overallComment);
+  assert.ok(first.json.review.improvedAnswer);
+  assert.equal(first.json.semantic, false);
+  assert.ok(['followup', 'clarify', 'next'].includes(first.json.review.decision));
+  const turnsAfterFirst = first.json.view.turns.length;
+
+  const duplicate = await callApi(handler, {
+    method: 'POST', url: '/api/codementor/interview/answer', headers: writeHeaders,
+    body: { projectId: id, sessionId: session.sessionId, turnId: 'turn-aaaaaa', answer: '重复提交' },
+  });
+  assert.equal(duplicate.status, 200);
+  assert.equal(duplicate.json.replayed, true);
+  assert.equal(duplicate.json.view.turns.length, turnsAfterFirst);
+
+  const second = await callApi(handler, { method: 'POST', url: '/api/codementor/interview/start', headers: writeHeaders, body: { projectId: id, difficulty: 'mid', maxQuestions: 3 } });
+  const weak = await callApi(handler, {
+    method: 'POST', url: '/api/codementor/interview/answer', headers: writeHeaders,
+    body: { projectId: id, sessionId: second.json.session.sessionId, turnId: 'turn-bbbbbb', answer: '不知道' },
+  });
+  assert.equal(weak.status, 200);
+  assert.notEqual(
+    `${weak.json.review.overallComment}`,
+    `${first.json.review.overallComment}`,
+    'different answers must produce different reviews',
+  );
+  const weakNext = weak.json.next?.prompt || '';
+  const firstNext = first.json.next?.prompt || '';
+  assert.notEqual(firstNext, weakNext, 'different answers must lead to different follow-ups');
+
+  const finished = await callApi(handler, { method: 'POST', url: '/api/codementor/interview/finish', headers: writeHeaders, body: { projectId: id } });
+  assert.equal(finished.status, 200);
+  assert.equal(finished.json.view.status, 'finished');
+});
+
+await test('semantic reviewer parses structured JSON, validates evidence and follows up on the answer', async () => {
+  let captured = null;
+  const payload = {
+    correctPoints: ['指出 ET 需要读到 EAGAIN'],
+    incorrectPoints: [{ claim: 'ET 会一直通知', whyIncorrect: 'ET 由状态变化触发，不保证重复通知', file: 'src/main.c', line: 5 }],
+    missingPoints: ['没有解释不读完会导致旧事件丢失'],
+    uncertainties: ['需要核对缓冲区大小'],
+    dimensions: { technicalAccuracy: 3, sourceGrounding: 2, engineeringTradeoffs: 2, communication: 4 },
+    overallComment: '你把读到 EAGAIN 说对了，但把触发条件说错了，而且没有说明未读完的风险。',
+    improvedAnswer: { concise: 'ET 下要读到 EAGAIN，否则边缘事件不再通知。', detailed: 'ET 依赖状态变化；未读完会丢掉后续事件，需要维护读缓冲与解析状态。' },
+    decision: 'followup',
+    nextQuestion: '如果只读到半个命令，之后没有新数据，ET 下会发生什么？',
+    nextQuestionWhy: '检查你是否理解边缘触发与缓冲状态。',
+    evidence: [{ file: 'src/main.c', line: 5 }, { file: 'not/indexed.c', line: 1 }],
+  };
+  const fakeCtx = {
+    get(name) {
+      if (name === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'fake', model: 'fake' }) };
+      if (name === 'llm') {
+        return {
+          async *stream(options) {
+            captured = options;
+            yield { type: 'text-delta', text: JSON.stringify(payload) };
+            yield { type: 'finish', reason: { kind: 'stop' } };
+          },
+        };
+      }
+      return undefined;
+    },
+    effect: (fn) => fn(),
+  };
+  const reviewer = createSemanticReviewer(fakeCtx);
+  assert.equal(reviewer.available(), true);
+  const result = await reviewer.review({
+    projectName: 'sample',
+    question: '为什么 ET 要读到 EAGAIN？',
+    answer: '因为 ET 会一直通知。',
+    evidence: [{ file: 'src/main.c', line: 5 }],
+    knownFiles: ['src/main.c'],
+    snippets: '5  if (read(...) < 0) ...',
+    dimension: 'mechanism',
+    difficulty: 'senior',
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.semantic, true);
+  assert.equal(result.decision, 'followup');
+  assert.match(result.nextQuestion, /半个命令/);
+  assert.equal(result.dimensions.technicalAccuracy, 3);
+  assert.equal(result.evidence.length, 1);
+  assert.ok(result.uncertainties.some((item) => item.includes('not/indexed.c')));
+  assert.equal(captured.provider, 'fake');
+  assert.ok(captured.system.includes('面试官'));
+  assert.ok(!JSON.stringify(captured).includes('CodeMentor 项目源码学习'), 'no full repo or system prompt leak');
 });
 
 /* ------------------------------------------------------------ real repository */
@@ -636,6 +868,11 @@ await test('real repository: scan finds entry, modules, build system and a sourc
   assert.ok(overview.mermaid.architecture.startsWith('flowchart'));
 
   const knowledge = (await realService.ensureKnowledge({ path: realProject })).knowledge;
+  const realView = buildUiView(knowledge, { projectId: 'real' });
+  assert.ok(!realView.home.modules.some((module) => module.name === '(root)' || module.name === 'doc'));
+  assert.ok(realView.lessons.items.length >= 2);
+  assert.ok(realView.home.findings.length >= 3);
+  assert.ok(realView.practice.categories.find((category) => category.id === 'understand').tasks.length >= 3);
   const index = buildSymbolIndex(knowledge);
   assert.ok(index.definitions.has('cmd_dispatch'));
   const symbols = findSymbols(knowledge, 'cmd_dispatch');

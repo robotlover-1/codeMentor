@@ -1,408 +1,261 @@
-# CodeMentor — Project Code Learning & Engineering Mentor
+# CodeMentor v2 — Project Code Learning & Engineering Mentor
 
-把代码仓库转化为**可交互、可验证、可持续学习**的工程训练环境。CodeMentor 是 DeepSeek Harness（DSH）的 Cordis 插件，不修改 Agent Loop，不重复实现文件读取、搜索、终端、模型调用与会话持久化能力。
+把代码仓库转化为**可导入、可阅读、可练习、可面试、可验证**的工程训练环境。CodeMentor 是 DeepSeek Harness（DSH）的 Cordis 插件，不修改 Agent Loop，不重复实现文件读取、搜索、终端、模型调用与会话持久化能力。
 
 - 包名：`@local/codementor`
-- 版本：`1.0.0`
-- 运行形态：Host 插件（8 个工具 + 系统提示段 + 只读 HTTP 投影）+ Client 插件（`sidebar.panellist` / `main` 中的 CodeMentor 面板）
+- 版本：`2.0.0`
+- 运行形态：Host 插件（8 个工具 + 系统提示段 + 项目/源码/面试 API）+ Client 插件（CodeMentor 面板）
 - 数据目录：`~/.dsh/codementor`（可用 `dataDir` 覆盖），**不写入业务仓库**
+- 自动化测试：**40 passed, 0 failed**
 
 ---
 
-## 1. 能力总览
+## 1. v2 改了什么
 
-| 模块 | 能力 | 对应工具 |
-|---|---|---|
-| A. 项目自动分析 | 语言/构建/入口/模块依赖/符号/调用链/并发/存储/测试/CI/风险，每条结论带 `path:line` 与证据类别 | `codementor_scan`、`codementor_overview` |
-| B. 源码精读定位 | 符号定义、调用点、文件符号表、跨函数调用链（带置信度与外部调用） | `codementor_explore` |
-| C. 个性化学习路线 | P0/P1/P2、30 分钟 / 2 小时 / 深度学习预算、前置依赖排序、下一步建议 | `codementor_roadmap`、`codementor_progress` |
-| D. 工程实战 | 真实源码练习题、修改前检查、guided/coop/reference 三档指导、可执行验证闭环 | `codementor_practice` |
-| E. 技术面试 | 基于真实源码的题库、一问一答、四维评分、逐层追问、薄弱点记录、推荐回答 | `codementor_interview` |
-| F. 跨会话知识 | Git Commit + 文件 mtime/size 增量缓存、受影响结论标记 stale、多项目隔离 | `codementor_refresh` + 内部 `KnowledgeStore` |
+针对评审指出的 P0/P1 问题，v2 不是换文案，而是补齐真实交互闭环：
 
-**诚实性约束（内建）**
-
-- 每条实现事实都携带证据；`kind` 只会是 `source` / `doc` / `inference` / `unverified`。
-- README 与源码冲突时以源码为准，并输出 `conflicts`。
-- 符号解析是**启发式**的（注释/字符串掩码 + 结构扫描），不是 AST；输出里明确标注。
-- 未执行的验证步骤永远标记为 `skipped/manual`，不会被描述为通过。
+| 问题 | v2 实现 |
+|---|---|
+| 无法导入/切换项目 | 面板输入本地目录 → `POST /projects/scan` 真实扫描 → 自动进入项目首页；项目选择器切换缓存项目；导入/扫描成功后登记 approved root |
+| 代码探索看不到源码 | 服务端文件树 + 受控源码读取 API；左侧树/搜索，右侧真实源码、行号、目标行高亮；点击模块/调用链/证据/符号统一 `openSource(file,line)` |
+| 面试间只能看题库 | 面板内开始面试、多行输入、Ctrl+Enter 提交；作答前**不返回**参考答案/评分要点/预期事实；提交后由 Host 默认模型做语义评审并生成基于本次回答的追问 |
+| 模块职责不直观 | 每模块生成 `summary / responsibility / inputs / outputs / upstream / downstream / startHere / confidence` 自然语言卡片 |
+| 结论与证据看不懂 | 首页默认只展示 3–5 条“核心发现与源码依据”，底层 claims 折叠到“分析详情” |
+| 学习路线太浅 | 课程级 `lesson`：概念 → 阅读入口 → 追踪调用链 → 解释问题 → 低风险验证；含完成标准、前置、预计时间、状态 |
+| 实践题像静态模式 | 分“入门理解（只读）/ 小型修改 / 工程挑战”；候选风险 ≠ 已确认 Bug；完成解释可请求导师评审 |
+| 项目切换串状态 | 面板以 `projectId` 为 key 重挂载；取消旧请求；每个项目独立知识、课程进度、面试会话 |
 
 ---
 
 ## 2. 快速开始
 
-插件已安装到当前 profile 时，直接在对话中使用：
-
-```text
-codementor_scan path="C:/path/to/project"
-codementor_overview path="C:/path/to/project"
-codementor_explore path="C:/path/to/project" target="cmd_dispatch" mode="chain" depth=5
-codementor_roadmap path="C:/path/to/project" goal=onboarding level=intermediate mode=2h
-codementor_progress path="C:/path/to/project" action=record module="Core/Src" level=2 evidence_kind=explained detail="能解释 main→cmd_dispatch→rtc_set_time" ref="Core/Src/main.c:249"
-codementor_practice path="C:/path/to/project" action=list
-codementor_practice path="C:/path/to/project" action=brief task_id="#1" mode=coop
-codementor_practice path="C:/path/to/project" action=verify task_id="#1" authorized=true steps='["diff-check","diff-stat"]'
-codementor_interview path="C:/path/to/project" action=start difficulty=mid max_questions=3
-codementor_interview path="C:/path/to/project" action=answer answer="……"
-codementor_interview path="C:/path/to/project" action=report
-codementor_refresh path="C:/path/to/project"
-```
-
-省略 `path` 时按顺序解析：当前会话工作目录 → `config.projectRoot` → 进程 cwd。
-
----
-
-## 3. 插件架构
-
-```mermaid
-flowchart LR
-  A["codementor_* 工具"] --> S["CodeMentorService"]
-  S --> K["KnowledgeStore<br/>~/.dsh/codementor"]
-  S --> P["scanProject<br/>walk / parse / analyze"]
-  P --> G["Git facts<br/>commit·branch·dirty·diff"]
-  P --> M["模块图 + 符号表 + 调用链"]
-  S --> R["roadmap / progress"]
-  S --> L["practice + verify"]
-  S --> I["interview bank + grading"]
-  S --> U["buildUiView"]
-  U --> W["/api/codementor/*<br/>只读缓存投影"]
-  W --> C["Web 面板<br/>sidebar.panellist + main"]
-  B["systemPrompt.section<br/>codementor:behavior"] -.行为规范.-> A
-```
-
-### 源文件
-
-| 文件 | 职责 |
-|---|---|
-| `index.js` | Host 插件入口：8 个工具、系统提示段、只读路由、生命周期清理；输出统一经过 lossless JSON 归一化 |
-| `lib/core.js` | 错误类型、语言表、注释/字符串掩码、括号匹配、评分与 `void` 返回类型判断 |
-| `lib/fs-scan.js` | 文件清单（忽略构建产物/依赖目录）、命令执行（优先 `ctx.subprocess`）、Git 事实、知识库原子读写 |
-| `lib/parse.js` | 启发式解析：C/C++、Python、Go、Java/C#/Kotlin、Rust、汇编、JS/TS；函数/结构/原型/导入/TODO/信号 |
-| `lib/analyze.js` | 模块图、入口、调用链、数据结构生命周期、并发/存储、风险、文档冲突、Mermaid、stale 标记 |
-| `lib/plan.js` | 优先级加权、时间预算、前置拓扑排序、证据门槛式进度、下一步推荐 |
-| `lib/practice.js` | 练习题生成、修改前检查、三档 brief、验证计划与真实执行 |
-| `lib/interview.js` | 题库生成、会话状态机、关键词覆盖评分、追问、薄弱点、报告 |
-| `lib/service.js` | 项目解析、缓存生命周期、工具载荷与 Markdown 渲染、UI 视图模型 |
-| `lib/define-tool.js` | 优先加载真实 `defineTool`，桌面安装下使用等价的无依赖回退实现 |
-| `client.js` | Web 面板（React，经 `window.__ModuleLoader__` 注册），只读消费缓存 |
-| `tests/run.mjs` | 36 项自动化测试（fixture + 真实多模块仓库） |
-
-### 扩展点选择
-
-- **工具**：`ctx.tools.register`（Agent 可调用；不另造文件/搜索/终端能力）。
-- **行为规范**：`ctx.systemPrompt.section({ name:'codementor:behavior', order:9000 })`，只追加文本，不替换完整提示。
-- **UI**：`ctx.slots.inject('sidebar.panellist' | 'main')`，不写 DOM、不替换应用根、不改主题。
-- **数据**：Host 侧 `KnowledgeStore` 独立目录；Client 通过只读 HTTP 投影读取，Agent 与 UI 共用同一份缓存。
-- **清理**：所有注册都包在 `ctx.effect` 中并返回 disposer；禁用插件后工具/路由/提示段全部移除（已实测）。
-
----
-
-## 4. 工具参考
-
-所有工具返回结构化 JSON，并附带中文 Markdown 渲染；`ok:false` 时返回 `error.code` / `error.message`，不会抛出到 Agent Loop（取消操作除外，`AbortError` 原样传播）。
-
-### 4.1 `codementor_scan`
-
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| `path` | string | 本地项目路径；拒绝 `https://`/`git@` 等远程地址并提示先克隆 |
-| `force` | boolean | 忽略 mtime/size 缓存，重新解析全部文件 |
-
-输出：`project`（语言、清单、构建命令、Git）、`stats`、`modules`、`entryPoints`、`cache`、`change`、`diagnostics`、`skipped`、`warnings`。
-
-### 4.2 `codementor_overview`
-
-`section` 可选 `all/architecture/entry/chain/data/concurrency/storage/testing/build/risk/conflict`；`maxModules` 控制模块条数。
-
-输出：一句话结论、主要问题、Mermaid 架构图、模块职责与依赖、典型调用链、启动路径、核心数据结构与生命周期、并发模型、存储、构建、风险、文档冲突、claims（带 kind/stale）、证据统计。
-
-### 4.3 `codementor_explore`
-
-`mode`：
-
-- `symbol`：定义 + 调用点（同文件→同模块→首个定义消歧；原型优先降权）
-- `file`：文件语言/行数/模块、符号、结构、导入、TODO
-- `chain`：从符号出发的 BFS 调用链，`depth` 1–8；输出节点、边、主路径、未解析外部调用、`confidence`
-- `search`：模块/结构/文件/TODO 元数据检索（原始文本请用 `grep`）
-- `references`：调用点列表
-
-### 4.4 `codementor_roadmap`
-
-`goal` ∈ `overview/onboarding/module/maintenance/debug/feature/interview`；`level` ∈ `beginner/intermediate/advanced`；`mode` ∈ `30m/2h/deep`；`focus` 关键词。
-
-评分（可配置权重）：
-
-```text
-score = w1·importance + w2·frequency + w3·goalRelevance + w4·dependency + w5·gap
-P0：入口模块，或 score ≥ 0.55
-P1：排名前 50% 且 score ≥ 0.2，或 score ≥ 0.35
-P2：辅助模块、工具/文档目录、证据不足模块
-```
-
-- 学习顺序先按前置依赖做拓扑排序，再按评分排列。
-- `doc/docs/tests/tools/scripts` 等辅助目录与低重要度根模块默认 P2，不占用 P0/P1 预算。
-- 时间模式只是**内容预算**，不承诺掌握程度。
-
-### 4.5 `codementor_progress`
-
-`action` ∈ `list/record/next`。`record` 需要 `module`、`level`（0–5）、`evidence_kind`：
-
-| 等级 | 含义 | 必需证据 |
-|---|---|---|
-| 0 | 未学习 | — |
-| 1 | 已理解基本概念 | `read` 或 `explained` |
-| 2 | 能解释真实调用链 | `explained` |
-| 3 | 能独立定位相关代码 | `located` |
-| 4 | 能独立修改并验证 | `modified` + `verified` |
-| 5 | 能通过技术追问 | `interview` 且评分 ≥ 0.6 |
-
-证据不足时**不会降级已获得等级**，也不会跳级；返回缺少的证据类型。
-
-### 4.6 `codementor_practice`
-
-`action`：
-
-- `list` / `generate`：按类别均衡生成练习（todo / safety / boundary / error-handling / testing / refactor），默认 12 条
-- `brief`：`task_id` 支持真实 id 或 `#1` 序号；`mode` ∈ `guided/coop/reference`
-- `reference`：仅在机械可推导时给出补丁建议，`verified:false`
-- `verify`：**必须** `authorized=true`；只执行验证计划中 `available=true` 的 argv；记录真实退出码与输出尾部
-
-修改前检查固定包含：预期行为、当前行为、修改范围、依赖、不变量、风险等级/影响面、验证方案。
-
-### 4.7 `codementor_interview`
-
-`action` ∈ `start/question/answer/hint/report/bank`。
-
-- 题库按维度生成：架构、调用链、数据结构、并发、性能、失败路径、设计取舍、代码修改场景。
-- 默认一次只问一题；答完给四维评分（原理/源码/设计/表达）、纠错、推荐回答（简洁版+深入版），再决定追问/重问/下一题。
-- 评分是**关键词覆盖 + 表达结构**启发式，不是 LLM 主观判断；输出里明确标注 `method` 与 `caveat`。
-- 同一题最多重试一次，之后进入下一题；薄弱点写入项目知识库。
-
-### 4.8 `codementor_refresh`
-
-对比 Git Commit 与工作区：只重新解析 mtime/size 变化的文件，复用其余解析结果；改变证据文件的结论、调用链、练习被标记 `stale`；返回受影响模块与复用统计。
-
----
-
-## 5. 知识库与增量更新
-
-```text
-~/.dsh/codementor/
-├── index.json                      # 项目索引（id / root / commit / 更新时间）
-└── projects/<slug>-<hash8>/
-    └── knowledge.json              # 完整知识缓存
-```
-
-`knowledge.json` 关键字段：
-
-```jsonc
-{
-  "schemaVersion": 1,
-  "root": "C:/.../项目",
-  "git": { "commit": "...", "branch": "main", "dirtyCount": 221, "recent": [] },
-  "files": [ { "path": "Core/Src/main.c", "mtimeMs": 0, "size": 0,
-               "symbols": [], "structures": [], "signals": {} } ],
-  "modules": [], "symbols": [], "structures": [], "entryPoints": [],
-  "chains": [], "analysis": { "claims": [], "mermaid": {} },
-  "learning": { "plan": null, "progress": {} },
-  "practice": { "tasks": [], "records": [] },
-  "interview": { "bank": null, "sessions": [], "weakPoints": [] },
-  "change": { "added": [], "modified": [], "removed": [], "gitDiff": null }
-}
-```
-
-- 缓存按 `schemaVersion` 失效；`force` 触发全量重解析。
-- 默认 10 分钟 TTL + 内存缓存；`refresh` 强制走增量路径。
-- 多项目按 root 规范化路径哈希隔离，不会串项目事实。
-
----
-
-## 6. Web 面板
-
-侧边栏「CodeMentor 工程导师」→ 主面板，包含五个页签：
-
-1. **项目全景**：一句话结论、架构 Mermaid、模块重要度、调用链与启动路径、数据结构生命周期、并发、构建、风险、claims。
-2. **学习路线**：路线概览、P0/P1/P2 顺序、依据、前置、状态、下一步。
-3. **代码探索**：模块树、符号表、调用链、结构、文件清单（全部带 `path:line`）。
-4. **实践工坊**：任务列表、修改前检查、验证计划（可用性/不可用原因）。
-5. **面试间**：题库、推荐回答、薄弱点、最近一次报告。
-
-面板**只读**：只读取已分析缓存，不扫描文件系统、不执行命令。路由：
-
-```text
-GET /api/codementor/state             # 插件信息 + 项目列表
-GET /api/codementor/project[?id=...]  # 最近/指定项目的只读视图
-```
-
-未扫描任何项目时，面板显示 `codementor_scan` 引导。
-
----
-
-## 7. 安全与权限
-
-- 默认**只读**；扫描、定位、路线、面试都不写业务仓库。
-- 知识缓存只写入独立数据目录；写入采用临时文件 + 重命名。
-- 修改类操作需要用户明确授权；`practice verify` 默认拒绝执行，`authorized=true` 才运行白名单内的 argv。
-- 不自动克隆远程仓库；远程 URL 直接拒绝并提示本地克隆。
-- 不自动执行破坏性命令、不提交/推送、不重置 Git。
-- 敏感模式扫描（私钥、云密钥、通用凭据）只输出 `file:line` 与脱敏值，绝不输出原值。
-- 仓库内文本只作为源码数据分析，不作为指令执行（防提示词注入）。
-- 工具输出统一经过 lossless JSON 归一化，避免部分字段缺失导致调用失败。
-
----
-
-## 8. 配置
-
-在 `cordis.patch.yml` 的 `codementor` 行覆盖：
-
-```yaml
-- insert:
-    - id: codementor
-      name: '@local/codementor'
-      config:
-        projectRoot: ''
-        dataDir: 'C:/Users/me/.dsh/codementor'
-        cacheTtlMs: 600000
-        commandTimeoutMs: 60000
-        allowCommandExecution: true
-        includeVendored: false
-        maxFiles: 4000
-        maxFileBytes: 524288
-        maxParseFiles: 600
-        excludeDirs: []
-        vendoredDirs: []
-        priorityWeights: { importance: 0.35, frequency: 0.2, goalRelevance: 0.2, dependency: 0.1, gap: 0.15 }
-```
-
-| 字段 | 默认 | 作用 |
-|---|---|---|
-| `projectRoot` | — | 未传 `path` 时的项目根 |
-| `dataDir` | `~/.dsh/codementor` | 知识库目录 |
-| `cacheTtlMs` | 600000 | 磁盘缓存复用窗口 |
-| `commandTimeoutMs` | 60000 | 单条命令超时 |
-| `allowCommandExecution` | true | 总开关；false 时 `verify` 永不执行 |
-| `includeVendored` | false | 是否解析 Drivers/vendor 等第三方源码 |
-| `maxFiles` / `maxFileBytes` / `maxParseFiles` | 4000 / 512 KiB / 600 | 扫描与解析预算 |
-| `excludeDirs` / `vendoredDirs` | `[]` | 追加忽略/第三方目录 |
-| `priorityWeights` | 见上 | 路线评分权重 |
-
----
-
-## 9. 自动化测试
-
-```bash
-node tests/run.mjs
-```
-
-当前结果：**36 passed, 0 failed**。
-
-覆盖：
-
-- 掩码/括号匹配、C 函数/结构/原型/信号解析
-- Manifest、bundle patch、locale、icon、client 语法
-- 8 个工具注册、系统提示段、禁用/重新启用无残留
-- 工具输出 lossless JSON、取消传播
-- fixture 多模块工程的模块依赖、入口、调用链、explore
-- 路线 P0/预算/前置排序/工具模块过滤/权重可解释
-- 进度证据门槛（阅读不能跳级；modified+verified 才能到 4；interview≥0.6 到 5）
-- 练习题分类均衡、guided/coop/reference、void 返回过滤、授权前不执行、授权后真实执行构建/测试
-- 面试题库、单题会话、强答追问、弱答重试、报告与薄弱点
-- 缓存复用、增量刷新、变更文件 stale 标记
-- 缺失路径/远程 URL/空 target/无缓存等错误路径
-- 真实多模块工程（STM32F407）入口、真实调用链、结构生命周期、路线、连续三轮追问、Keil 构建不可用的诚实说明
-
-fixture：`tests/fixtures/sample-project`（C 多模块 + package.json 构建/测试命令 + CI + 文档）。
-
----
-
-## 10. 真实仓库验收示例
-
-仓库：`C:\Users\28935\Desktop\pp\批量转台球式\自研开发板STM32F407`（C / FreeRTOS 风格中断工程，Keil MDK + IAR + CubeMX）。
-
-| 验收项 | 实测结果 |
-|---|---|
-| 识别入口/模块/构建 | `Reset_Handler`（MDK-ARM/startup_stm32f407xx.s:168）→ `main`（Core/Src/main.c:135）；9 个模块；Keil `MDK-ARM/test.uvprojx`（不可自动执行，原因明确） |
-| 定位真实功能源码 | `cmd_dispatch` 解析到 `Core/Src/cmd_handler.c:849`（不是头文件原型） |
-| 跨函数调用链 | `main:249 → cmd_dispatch:856 → cmd_set_time:255 → rtc_set_time`，每步有调用点 |
-| 数据结构生命周期 | `PID_TypeDef`（Core/Inc/pid.h:36，9 字段）；实例 `g_location_pid` / `g_speed_pid`（pid.c:4-5）；判定 `declared-no-release-evidence` |
-| 学习路线 | 2h 模式：Core/Inc → Core/Src → MDK-ARM；`doc`、(root)、`Core/Inc/arch` 因辅助/证据不足被排除 |
-| 连续三轮追问 | `main→rtc_set_time` 调用链 → 失败返回路径 → 参数校验；三次评分均 strong（0.985） |
-| 修改任务 + 验证方案 | `sscanf` 边界检查（Core/Src/cmd_handler.c:121）；验证计划含 `git diff --check`、`git diff --stat`、Keil（不可用）、手工回归 |
-| 第二次进入复用 | `refresh` 返回 `up-to-date`，复用 51 个文件，重新解析 0 |
-| 错误路径 | 不存在路径 → `PROJECT_NOT_FOUND`；远程 URL → `REMOTE_REPOSITORY`；空 target → `INVALID_TARGET` |
-| UI | 侧边栏/主面板注册 active；`/api/codementor/project` 返回约 93 KB 只读视图 |
-
-**关于验证的诚实记录**：`git diff --check` 在真实仓库上实际执行并**失败**（exit 2，构建产物与文档存在行尾空白）；`git diff --stat` 执行通过。演示中未执行 Keil 构建，也未修改任何业务源码。
-
----
-
-## 11. 已知限制
-
-1. **符号解析是启发式**：宏、条件编译、函数指针、模板、重载、跨文件同名符号需要人工核对；所有节点标注 `confidence`。
-2. **默认不解析第三方源码**（`Drivers`/`Middlewares` 等）：只统计文件/字节，不索引符号；需要时设 `includeVendored: true`（受解析预算限制）。
-3. **没有 LSP/AST/编译数据库**：C 的隐式声明、复杂宏展开、K&R 定义可能漏检；调用链可能含 `inferred` 或外部调用。
-4. **构建可用性不探测工具链**：Keil/IAR/CMake 是否安装不预判；执行失败会如实记录，不会伪称通过。
-5. **面试评分是关键词覆盖启发式**：能发现遗漏，但不能证明技术判断一定正确；以证据行为准。
-6. **UI 只读**：面板不触发扫描、不执行命令；学习动作仍在对话中完成。
-7. **不自动克隆远程仓库**；请先本地克隆。
-8. **大仓库预算**：超出 `maxFiles` / `maxParseFiles` 会截断并报告 diagnostics。
-9. **增量粒度是文件**：文件内局部改动会重解析整个文件，但不重解析未变化文件。
-
----
-
-## 12. 阶段状态
-
-| 阶段 | 状态 |
-|---|---|
-| Phase 1：扫描/架构/定位/调用链/路线/面试/缓存 | ✅ 完成并验证 |
-| Phase 2：修改练习/Diff/风险评估/构建与测试执行/验证记录/错题 | ✅ 完成并验证（真实命令执行 + 诚实失败） |
-| Phase 3：交互式架构视图/复杂状态机/增量更新/进度可视化/符号联合检索 | 🟡 部分：UI 五页签、Mermaid、增量刷新、进度可视化已完成；状态机自动分析、LSP/语义联合检索未做 |
-
----
-
-## 13. 安装 / 卸载
-
-安装（在 DSH 会话中使用 `plugin_manager`）：
+### 2.1 安装
 
 ```text
 plugin_manager action=install_bundle target="C:/Users/28935/Documents/deepseek-harness/default-workspace/codementor"
 ```
 
-- 已实测：`application: applied`，8 个工具出现，`sidebar.panellist` 与 `main` 注册 active。
-- 修改 Host 代码后，用 `set_plugin` 禁用再启用即可重新加载当前模块；升级已安装包后若提示 `restart-required`，重启 DSH。
-- 禁用后工具从 `Tool.listTools` 消失；重新启用后恢复（已实测）。
-- 卸载：
+安装结果：`application: applied`；侧边栏出现 **CodeMentor**；8 个 `codementor_*` 工具注册；`sidebar.panellist#codementor` 与 `main#codementor` 均为 active。
+
+> 修改 Host 代码后，用 `plugin_manager action=set_plugin target=include:codementor enabled=false` 再 `enabled=true` 重新加载；修改 `client.js` 后需要刷新浏览器页面加载新客户端模块。
+
+### 2.2 面板使用
+
+1. 点击侧边栏 **CodeMentor**。
+2. 首次使用：在“导入本地项目”输入本机目录（如 `C:\work\my-project`），点“导入并扫描”。
+3. 首页会显示：项目简介、3 步入门、真实调用链、核心模块卡片、核心发现与源码依据。
+4. 点“开始第一课”进入课程；点模块“从这里开始”/证据链接进入源码阅读器。
+5. “面试”页选择难度/目标/题数 → 开始 → 输入回答 → 提交 → 查看点评与下一问。
+
+### 2.3 工具入口（Agent 侧仍可用）
 
 ```text
-plugin_manager action=remove_bundle target="@local/codementor"
+codementor_scan path="C:/path/to/project"
+codementor_overview path="C:/path/to/project"
+codementor_explore path="C:/path/to/project" target="cmd_dispatch" mode="chain"
+codementor_roadmap path="C:/path/to/project" goal=onboarding level=intermediate mode=2h
+codementor_progress path="C:/path/to/project" action=record module="Core/Src" level=2 evidence_kind=explained detail="..." ref="Core/Src/main.c:249"
+codementor_practice path="C:/path/to/project" action=list
+codementor_practice path="C:/path/to/project" action=verify task_id="#1" authorized=true
+codementor_interview path="C:/path/to/project" action=start difficulty=mid max_questions=3
+codementor_refresh path="C:/path/to/project"
 ```
-
-卸载不会删除 `~/.dsh/codementor` 中的知识缓存；需要时手动删除该目录。
 
 ---
 
-## 14. 开发
+## 3. 交互闭环
+
+```mermaid
+flowchart LR
+  P["导入/切换项目"] --> H["首页：3 步入门 + 模块职责"]
+  H --> L["课程：概念→阅读→链路→解释→验证"]
+  H --> S["源码阅读器：树/搜索/file:line"]
+  L --> S
+  S --> P2["实践：只读/小改/挑战"]
+  P2 --> R["提交解释 → 导师评审"]
+  L --> I["面试：作答 → 语义评审 → 动态追问"]
+  I --> H
+```
+
+- 所有源码位置共享同一个导航入口：`openSource(projectId, file, line)`。
+- 作答前当前题只返回 `questionId/prompt/dimension/difficulty/kind/why`；答案、rubric、预期事实留在 Host。
+- 课程“标记完成”必须有解释 + `file:line` 证据，不能只点按钮。
+
+---
+
+## 4. 架构
+
+```mermaid
+flowchart LR
+  UI["client.js 面板"] --> API["lib/api.js<br/>同源 + action 头"]
+  API --> S["CodeMentorService"]
+  S --> REG["ProjectRegistry<br/>approved roots"]
+  S --> K["KnowledgeStore<br/>~/.dsh/codementor"]
+  S --> SRC["source.js<br/>realpath 校验 / 范围读取"]
+  S --> MENTOR["mentor.js<br/>narratives/findings/lessons/practice"]
+  S --> LIVE["interview-live.js<br/>会话状态机"]
+  LIVE --> REV["reviewer.js<br/>ctx.llm 语义评审"]
+  S --> ANALYSIS["analyze/parse/plan/practice"]
+```
+
+### 新增/重构文件
+
+| 文件 | 职责 |
+|---|---|
+| `lib/projects.js` | approved root 注册表；只接受 id，服务端解析 realpath，拒绝移动/越界根 |
+| `lib/source.js` | 文件树、范围读取、符号片段；拒绝 `..`、绝对路径、符号链接逃逸、敏感文件、超大文件 |
+| `lib/mentor.js` | 模块自然语言叙事、核心发现、3 步入门、课程模型、分级实践视图 |
+| `lib/reviewer.js` | Host 端语义评审：当前默认模型 + 严格 JSON + 证据校验 + 超时/降级 |
+| `lib/interview-live.js` | 面试状态机：asking → reviewing → asking/finished；turnId 幂等；动态追问 |
+| `lib/api.js` | 项目/源码/课程/面试 HTTP API；写操作同源校验与 action 头 |
+| `client.js` | 五页签交互面板（首页/路线/源码/实践/面试） |
+
+---
+
+## 5. API
+
+所有写操作需 `x-codementor-action: 1` + `content-type: application/json`；若携带 `Origin`，必须与 `Host` 一致。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/codementor/state` | 插件信息、项目列表、评审器可用性 |
+| GET | `/api/codementor/projects` | 已导入项目 |
+| POST | `/api/codementor/projects/scan` | `{path}` 导入并扫描本地目录 |
+| GET | `/api/codementor/project?id=` | 面板视图（首页/课程/实践/面试） |
+| POST | `/api/codementor/project/refresh` | `{projectId}` 增量刷新并重扫变化文件 |
+| GET | `/api/codementor/tree?projectId=` | 文件树 |
+| GET | `/api/codementor/file?projectId=&path=&start=&end=` | 真实源码范围 |
+| GET | `/api/codementor/symbol?projectId=&symbolId=` | 函数签名、调用方、被调用方 |
+| GET | `/api/codementor/lessons?projectId=` | 课程与进度 |
+| POST | `/api/codementor/lesson/update` | 开始/完成课程（完成需证据） |
+| POST | `/api/codementor/learning/save` | 收藏源码位置 |
+| POST | `/api/codementor/interview/start` | 开始一轮 |
+| GET | `/api/codementor/interview?projectId=` | 当前题/历史/报告 |
+| POST | `/api/codementor/interview/answer` | `{sessionId,turnId,answer}` 提交回答 |
+| POST | `/api/codementor/interview/finish` | 结束本轮 |
+| POST | `/api/codementor/practice/review` | 提交实践解释请求导师评审 |
+
+---
+
+## 6. 安全
+
+- **项目根**：只从 `ProjectRegistry` 的 approved root 解析；客户端只传 `projectId`，不传绝对路径。
+- **路径**：拒绝 `..`、盘符绝对路径、NUL；`realpath` 后再次校验仍在根内；符号链接逃逸拒绝。
+- **文件**：允许源码/配置/文档白名单；拒绝 `.env`、私钥、证书、keystore；单文件 ≤2 MiB，单次 ≤600 行。
+- **写请求**：同源 + `x-codementor-action` + JSON；跨站 `Sec-Fetch-Site` 拒绝；请求体上限 512 KiB。
+- **模型**：只在 Host 调用 `ctx.llm`，浏览器无 API Key；只发送题目、回答、有限证据片段，不发送整个仓库。
+- **仓库文本是不可信数据**：不执行源码/README 中的指令；修改、终端、Git 写操作仍需显式授权。
+- **降级透明**：无模型路由时评审明确标为“规则诊断”，不伪装成语义评分。
+
+---
+
+## 7. 学习课程
+
+课程模型示例：
+
+```json
+{
+  "lessonId": "lesson:core-src",
+  "title": "读懂 Core/Src：程序入口与主循环",
+  "whyLearn": "……",
+  "prerequisites": ["Core/Inc"],
+  "learningObjectives": ["能说清职责", "能沿真实调用点解释链路", "能给出 file:line"],
+  "steps": [
+    { "type": "concept", "title": "先理解它解决什么问题", "content": "……" },
+    { "type": "read", "title": "阅读推荐入口", "target": { "file": "Core/Src/main.c", "line": 135 } },
+    { "type": "trace", "title": "追踪一条真实调用链", "chainId": "entry:program-entry:main", "steps": [] },
+    { "type": "explain", "title": "用自己的话解释", "prompt": "……" },
+    { "type": "verify", "title": "做一次低风险验证", "readOnly": true }
+  ],
+  "completionCriteria": ["能不看笔记说出职责", "能指出至少两个 file:line", "能解释一个失败/边界路径"],
+  "estimatedMinutes": 30,
+  "status": "not_started"
+}
+```
+
+进度按项目独立保存到 knowledge.json；完成需要 `detail` + `ref`（`file:line`）。
+
+---
+
+## 8. 面试语义评审
+
+- 评审器在 Host：`ctx.get('llm')` + `ctx.get('agentDefaultModel').currentSelection()`。
+- 为控制推理 token 消耗，评审请求使用模型最低 reasoning effort，并把 `maxTokens` 提到 4096；超时 120 秒。
+- 输出结构化 JSON：`correctPoints / incorrectPoints / missingPoints / uncertainties / dimensions(0-5) / overallComment / improvedAnswer / decision / nextQuestion / evidence`。
+- 证据校验：模型给出的 `file:line` 必须命中已知文件，否则移入 `uncertainties`。
+- 决策：`followup / clarify / next / finish`；追问文本来自本次回答，不是固定模板。
+- 同一 `turnId` 重复提交只返回第一次结果，不重复计分。
+- 无模型时降级为规则诊断，并明确标注。
+
+---
+
+## 9. 真实仓库验收（2026-10-30）
+
+仓库：`C:\Users\28935\Desktop\pp\批量转台球式\自研开发板STM32F407`（C / Keil + IAR + CubeMX 多模块工程）。
+
+| 验收 | 实测 |
+|---|---|
+| 项目导入 | `POST /projects/scan` 返回 200，项目登记为 approved root，自动进入首页 |
+| 项目切换 | 自动化 API 测试（fixture A/B）：项目 id 独立，视图 meta/projectId 对应，旧请求取消 |
+| 文件树/源码 | 树 1678 项；`Core/Src/main.c` 240–255 行真实内容；`../../Windows/win.ini` → 403 `PATH_TRAVERSAL` |
+| 新增文件 | 自动化 API 测试（fixture）：新增 `src/new_module.c`，refresh 后文件树可见 |
+| 课程 | 3 课（Core/Inc → Core/Src → MDK-ARM）；完成缺证据 → 409；带 `src/main.c:5` → 200 |
+| 面试隐藏答案 | start 返回当前题不含 `recommended/expectedFacts/rubric` |
+| 语义评审 | 真实模型 `semantic=true`，维度 `technicalAccuracy=3, sourceGrounding=2, engineeringTradeoffs=2, communication=3`，decision=`followup` |
+| 追问依赖回答 | 对错误回答（EPOLL/ET 内容）指出“完全偏离题目、引入源码中不存在的概念”，并生成不同追问 |
+| 幂等 | 自动化 API 测试：同一 turnId 二次提交 `replayed=true`，turn 数不增加 |
+| 建模 | 主调用链 `main:249 → cmd_dispatch:856 → cmd_set_time:255 → rtc_set_time`；`PID_TypeDef` 生命周期证据 |
+| 构建 | Keil 构建标记不可自动执行；未执行，未伪称通过 |
+
+**未完成/未验证**：
+
+- 没有浏览器级自动化或像素级 UI 截图；UI 仅通过 Slot 注册、HTTP API 与 `client.js` 语法检查验证。需要刷新页面加载 v2 客户端。
+- 没有执行 Keil 构建；验证计划如实标为手工/不可用。
+- 语义评审的点评文本可能出现行号笔误（已在 prompt 中禁止新造行号，并校验结构化 `evidence`，但自由文本无法完全自动验证）。
+- 实践“提交 Patch 并自动评审”未实现；当前支持提交解释评审，修改与验证仍走 `codementor_practice` 工具与显式授权。
+
+---
+
+## 10. 测试
 
 ```bash
-cd codementor
-node tests/run.mjs            # 36 项测试
-node -e "import('./index.js')" # 模块自检
+node tests/run.mjs
 ```
 
-约束：不引入依赖、不修改 DSH 核心、不写 profile 的 `package.json` / `cordis.patch.yml`（安装由 `plugin_manager` 完成）。
+**40 passed, 0 failed**。覆盖：
+
+- 掩码/解析/符号/结构/原型/信号
+- 8 工具注册、提示段、禁用重启用、lossless JSON、取消
+- 模块依赖、调用链、路线前置排序、进度证据门槛
+- 静态练习、验证计划、授权前不执行/授权后真实执行
+- 旧面试工具兼容
+- 面板 API：导入两个项目、切换、树/文件、新文件刷新、路径穿越拒绝、缺 action 头/跨站拒绝
+- 课程完成证据门槛
+- 面试隐藏答案、语义/规则评审、turnId 幂等、不同回答不同追问
+- 语义评审器 JSON 解析、证据过滤、动态追问（fake llm）
+- 真实仓库扫描/链路/结构/三轮追问/实践诚实性
 
 ---
 
-## 15. 设计取舍摘要
+## 11. 已知限制与回滚
 
-- **为什么不上 Tree-sitter**：MVP 需要在任意 DSH 桌面安装中零依赖运行；掩码 + 结构扫描在 C/JS/Python/Go 上已能提供可核对的定位，且成本低。解析置信度被显式暴露，而不是伪装成精确。
-- **为什么缓存放 Host 而不是 Session 事件**：知识是派生缓存，Session 日志才是事实来源；放独立目录可跨会话复用，也不会写坏 Session 格式。
-- **为什么 UI 只读**：UI 扩展成本高、风险大；第一版先保证 Agent 工具闭环，再用只读投影提供可视化，避免 UI 成为第二个事实来源。
-- **为什么练习先给线索而不是补丁**：避免学习者对 AI 产生依赖；参考实现只在明确请求时给出，并标记未验证。
-- **为什么验证要分 executed / skipped**：工程上最常见的谎言是“构建应该能过”；CodeMentor 只记录真实退出码。
+1. 解析是启发式的：宏、条件编译、函数指针、重载可能漏检；输出标注 confidence。
+2. 默认不解析第三方源码；树仍展示可读文件，符号索引只覆盖已解析文件。
+3. 语义评审依赖当前默认模型；无模型/无凭据时降级为规则诊断。
+4. UI 仍需浏览器刷新才能拿到新的 client bundle；Host 代码需禁用/启用或重启。
+5. 文件树包含第三方目录；大仓库首次树请求约 1600+ 节点，仍受 6000 节点上限保护。
+6. 未实现“在面板内执行验证/修改”；这些操作需要对话工具 + 显式授权。
+
+回滚：上一版提交为 `928cef1`（v1.0.0）。可 `git revert` 本次提交，或 `git checkout 928cef1 -- .` 后重新安装；知识缓存按 schema 兼容保留，必要时删除 `~/.dsh/codementor`。
 
 ---
 
-## 16. 许可与归属
+## 12. 开发
 
-插件代码为本次交付原创；图标 `icon.svg` 为原创 SVG。未打包任何第三方源码或素材。
+```bash
+node tests/run.mjs
+node -e "import('./index.js')"
+node --check client.js
+```
+
+不引入第三方依赖；不修改 DSH 核心；不直接写 profile 的 `package.json` / `cordis.patch.yml`（安装由 `plugin_manager` 完成）。图标 `icon.svg` 为原创 SVG。

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "CodeMentor",
-    "description": "Scan a local project for evidence-cited architecture, learning roadmaps, source navigation, practice tasks and source-grounded interviews, with a cache that survives sessions and refreshes incrementally."
+    "description": "Import a local project, read real source, follow lesson-based paths, practise in tiers, and run source-grounded interviews with host-side semantic review and answer-dependent follow-ups."
   }
 }

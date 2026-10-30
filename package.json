@@ -1,8 +1,8 @@
 {
   "name": "@local/codementor",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "CodeMentor：把代码仓库转化为可交互、可验证、可持续学习的工程训练环境",
+  "description": "CodeMentor v2：可导入项目的源码阅读、课程式学习、分级实践与可追问的语义面试",
   "type": "module",
   "main": "index.js",
   "exports": {

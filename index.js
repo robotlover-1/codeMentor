@@ -7,8 +7,8 @@
  */
 
 import { resolveDefineTool } from './lib/define-tool.js';
+import { API_PATHS, createApiHandler } from './lib/api.js';
 import {
-  buildUiView,
   CodeMentorService,
   renderExplore,
   renderInterview,
@@ -135,72 +135,17 @@ export function apply(ctx, config) {
     });
   }, 'codementor behavior prompt section');
 
-  /* ------------------------------------------------------------- UI projection */
+  /* --------------------------------------------------------------- Web API */
 
   ctx.effect(() => {
     const webServer = typeof ctx.get === 'function' ? ctx.get('webServer') : undefined;
     if (!webServer?.register) return () => {};
-
-    const sendJson = (res, status, payload, method) => {
-      res.statusCode = status;
-      res.setHeader('content-type', 'application/json; charset=utf-8');
-      res.setHeader('cache-control', 'no-store');
-      if (method === 'HEAD') res.end();
-      else res.end(JSON.stringify(payload));
-    };
-
-    const handler = async (req, res) => {
-      const method = req.method || 'GET';
-      if (method !== 'GET' && method !== 'HEAD') {
-        sendJson(res, 405, { ok: false, error: { code: 'METHOD_NOT_ALLOWED', message: '只支持 GET/HEAD' } }, method);
-        return;
-      }
-      try {
-        const url = new URL(req.url || '/', 'http://localhost');
-        if (url.pathname === '/api/codementor/state') {
-          const status = await service.status();
-          sendJson(res, 200, {
-            ok: true,
-            plugin: status.plugin,
-            dataDir: status.dataDir,
-            runner: status.runner,
-            projects: status.projects,
-          }, method);
-          return;
-        }
-        if (url.pathname === '/api/codementor/project') {
-          const id = url.searchParams.get('id') || '';
-          const projects = await service.store.list();
-          const selectedId = id || projects[0]?.id || '';
-          if (!selectedId || !/^[a-z0-9._-]+$/i.test(selectedId)) {
-            sendJson(res, 404, { ok: false, error: { code: 'NO_PROJECT', message: '还没有已分析的 CodeMentor 项目。' } }, method);
-            return;
-          }
-          const loaded = await service.store.loadById(selectedId);
-          if (!loaded.ok) {
-            sendJson(res, 404, { ok: false, error: { code: 'NO_PROJECT', message: loaded.reason } }, method);
-            return;
-          }
-          const view = buildUiView(loaded.data);
-          sendJson(res, 200, { ok: true, projectId: selectedId, projects, view }, method);
-          return;
-        }
-        sendJson(res, 404, { ok: false, error: { code: 'NOT_FOUND', message: `未知路由 ${url.pathname}` } }, method);
-      } catch (error) {
-        sendJson(res, 500, {
-          ok: false,
-          error: { code: String(error?.code || 'INTERNAL'), message: String(error?.message || error) },
-        }, method);
-      }
-    };
-
+    const handler = createApiHandler(service);
     const disposers = [];
-    const registerRoute = (routePath) => {
+    for (const routePath of API_PATHS) {
       const dispose = webServer.register({ kind: 'exact', path: routePath, handler });
       if (typeof dispose === 'function') disposers.push(dispose);
-    };
-    registerRoute('/api/codementor/state');
-    registerRoute('/api/codementor/project');
+    }
     return () => {
       for (const dispose of disposers.reverse()) {
         try {
@@ -210,7 +155,7 @@ export function apply(ctx, config) {
         }
       }
     };
-  }, 'codementor read-only UI route');
+  }, 'codementor project/source/interview API');
 
   /* -------------------------------------------------------------------- tools */
 
