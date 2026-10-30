@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="CodeMentor — code learning and engineering mentor">
+  <defs>
+    <linearGradient id="cm-bg" x1="12" y1="8" x2="118" y2="122" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#10233A"/>
+      <stop offset="1" stop-color="#0B3B39"/>
+    </linearGradient>
+    <linearGradient id="cm-path" x1="34" y1="92" x2="96" y2="34" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#49D9C0"/>
+      <stop offset="1" stop-color="#F4C95D"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="url(#cm-bg)"/>
+  <g fill="none" stroke="#8FE9DB" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity=".85">
+    <path d="M33 38l-11 11 11 11"/>
+    <path d="M95 38l11 11-11 11"/>
+  </g>
+  <g fill="none" stroke="url(#cm-path)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M44 96c0-17 8-26 18-34 7-6 12-12 14-22"/>
+    <path d="M70 44l8-8 6 9"/>
+  </g>
+  <g fill="#F4C95D">
+    <circle cx="44" cy="96" r="5.6"/>
+    <circle cx="76" cy="62" r="3.6" fill="#49D9C0"/>
+  </g>
+  <rect x="79" y="27" width="17" height="17" rx="5" fill="#0A1826" stroke="#F4C95D" stroke-width="2.6"/>
+  <path d="M83.5 35.5l2.6 2.6 5-5.2" fill="none" stroke="#F4C95D" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="64" y="116" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="9.5" font-weight="700" fill="#D7F7F0" letter-spacing="1.6">CODEMENTOR</text>
+</svg>

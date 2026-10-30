@@ -1,0 +1,7 @@
+- insert:
+    - id: codementor
+      name: '@local/codementor'
+      config:
+        cacheTtlMs: 600000
+        commandTimeoutMs: 60000
+        allowCommandExecution: true
